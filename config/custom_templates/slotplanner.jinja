@@ -299,12 +299,13 @@
 {{- [s | int, e] | tojson -}}
 {%- endmacro -%}
 
-{#- Plans that still hold a block: [[device, start], ...] -#}
+{#- Plans that still hold a block: [[device, start, plan id, end], ...]. The end comes from sp_window_j,
+    so an active plan that runs past its block keeps holding it. -#}
 {%- macro sp_busy_j() -%}
 {%- set B = sp_block_s() | int -%}{%- set nu = as_timestamp(now()) | int -%}
 {%- set ns = namespace(v=[]) -%}
 {%- for p in (sp_state_j() | from_json).plans if p.st in ['planned','active'] -%}
-{%- set w = sp_window_j(p, B) | from_json -%}{%- if w[1] > nu -%}{%- set ns.v = ns.v + [[p.d, w[0], p.id]] -%}{%- endif -%}
+{%- set w = sp_window_j(p, B) | from_json -%}{%- if w[1] > nu -%}{%- set ns.v = ns.v + [[p.d, w[0], p.id, w[1]]] -%}{%- endif -%}
 {%- endfor -%}
 {{- ns.v | tojson -}}
 {%- endmacro -%}
@@ -324,7 +325,7 @@
 {%- set ns = namespace(same=0, own=0, other=[]) -%}
 {%- for b in sp_busy_j() | from_json if b[2] != skip -%}
 {%- if b[0] == d -%}{%- set ns.own = ns.own + 1 -%}{%- endif -%}
-{%- if b[1] < s + B and s < b[1] + B -%}
+{%- if b[1] < s + B and s < b[3] -%}
 {%- if b[0] == d -%}{%- set ns.same = 1 -%}{%- else -%}{%- set ns.other = ns.other + [b] -%}{%- endif -%}
 {%- endif -%}
 {%- endfor -%}
@@ -365,7 +366,11 @@
 {%- set B = c.general.block_hours | int * 3600 -%}{%- set Q = c.general.block_hours | int * 4 -%}
 {%- set nu = as_timestamp(now()) | int -%}{%- set t0 = (nu // 900 + 1) * 900 -%}
 {%- set q = sp_quarters_j(t0, c.solar.covers_kw) | from_json -%}
-{%- set taken0 = (sp_busy_j() | from_json) | map(attribute=1) | unique | list -%}
+{#- Held blocks as [start, end]; one entry per start, with the latest end. -#}
+{%- set busy = sp_busy_j() | from_json -%}
+{%- set h = namespace(v=[]) -%}
+{%- for st in busy | map(attribute=1) | unique | list -%}{%- set h.v = h.v + [[st, busy | selectattr(1,'eq',st) | map(attribute=3) | max]] -%}{%- endfor -%}
+{%- set taken0 = h.v -%}
 {%- set ns = namespace(taken=taken0, out=[]) -%}
 {%- set cnt = q | count -%}
 {%- for r in range(0, [c.general.blocks_per_day | int - taken0 | count, 0] | max) -%}
@@ -373,15 +378,15 @@
 {%- for i in range(0, [cnt - Q + 1, 0] | max) -%}
 {%- set a = q[i][0] -%}
 {%- if q[i + Q - 1][0] == a + B - 900 -%}
-{%- set ok = namespace(v=true) -%}{%- for w in ns.taken -%}{%- if a < w + B and w < a + B -%}{%- set ok.v = false -%}{%- endif -%}{%- endfor -%}
+{%- set ok = namespace(v=true) -%}{%- for w in ns.taken -%}{%- if a < w[1] and w[0] < a + B -%}{%- set ok.v = false -%}{%- endif -%}{%- endfor -%}
 {%- if ok.v -%}{%- set sm = q[i:i + Q] | map(attribute=3) | sum -%}{%- if sm < b.best -%}{%- set b.best = sm -%}{%- set b.a = a -%}{%- set b.i = i -%}{%- endif -%}{%- endif -%}
 {%- endif -%}
 {%- endfor -%}
-{%- if b.i >= 0 -%}{%- set ns.taken = ns.taken + [b.a] -%}{%- endif -%}
+{%- if b.i >= 0 -%}{%- set ns.taken = ns.taken + [[b.a, b.a + B]] -%}{%- endif -%}
 {%- endfor -%}
 {%- set p = sp_prices_j() | from_json -%}
 {%- set z = sp_solar_j(p | map(attribute=0) | list) | from_json -%}
-{%- for w in ns.taken | sort -%}
+{%- for w in ns.taken | map(attribute=0) | sort -%}
 {%- set v = p | selectattr(0,'ge',w) | selectattr(0,'lt',w + B) | list -%}
 {%- if v -%}{%- set zz = namespace(s=0) -%}{%- for x in v -%}{%- set zz.s = zz.s + z.get(x[0] | string, 0) | float(0) -%}{%- endfor -%}
 {%- set ns.out = ns.out + [{'s': w, 'e': w + B, 'p': (v | map(attribute=1) | sum / v | count * 100) | round(2), 'z': (zz.s / v | count) | round(3), 'sc': sp_score(w) | trim | int(-1)}] -%}

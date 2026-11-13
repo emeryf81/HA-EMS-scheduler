@@ -53,9 +53,24 @@ const api = async (p, body) => {
         const pid = 'car:' + free.dataset.slot;
         const del = R.querySelector(`[data-del="${pid}"]`); if (del) del.click(); await new Promise((r) => setTimeout(r, 2500));
         out.afterDel = (e._h.states['sensor.slotplanner_state'].attributes.plans || []).filter((x) => x.d === 'car').map((x) => x.s);
-        // conflict: dishwasher in the block that already holds dishwasher + pool
-        e._sel = 'car'; const blk = [...R.querySelectorAll('.blk.full')][0]; if (blk) blk.click(); await new Promise((r) => setTimeout(r, 9000));
-        out.conflict = (e.shadowRoot.querySelector('.msg') || {}).textContent;
+        // conflict: fill one block with dishwasher + pool pump, then try to add the car to it.
+        const plansOf = () => e._h.states['sensor.slotplanner_state'].attributes.plans || [];
+        const fx = [...R.querySelectorAll('.blk')].filter((b) => !b.classList.contains('full')).pop();
+        out.conflictRan = false;
+        if (fx) {
+          const fs = Number(fx.dataset.slot);
+          for (const d of ['dishwasher', 'pool_pump']) { await e._h.callService('script', 'slotplanner_plan', { device: d, start: fs }); await new Promise((r) => setTimeout(r, 3000)); }
+          out.fixture = plansOf().filter((x) => x.s === fs && x.st === 'planned').map((x) => x.d).sort();
+          e._sel = ''; e._sig = ''; e._render(); await new Promise((r) => setTimeout(r, 300));
+          const carBefore = plansOf().filter((x) => x.d === 'car').length;
+          e._sel = 'car'; e._sig = ''; e._render(); await new Promise((r) => setTimeout(r, 300));
+          const blk = e.shadowRoot.querySelector(`.blk.full[data-slot="${fs}"]`);
+          if (blk) { out.conflictRan = true; blk.click(); await new Promise((r) => setTimeout(r, 9000)); }
+          out.conflict = (e.shadowRoot.querySelector('.msg') || {}).textContent;
+          out.carAdded = plansOf().filter((x) => x.d === 'car').length - carBefore;
+          for (const d of ['dishwasher', 'pool_pump']) await e._h.callService('script', 'slotplanner_unplan', { plan_id: d + ':' + fs });
+          await new Promise((r) => setTimeout(r, 2500));
+        }
         e._tab = 'reports'; e._sig = ''; e._render();
         e.shadowRoot.querySelector('[data-sl="all"]').click(); e.shadowRoot.querySelector('[data-act="subadd"]').click(); await new Promise((r) => setTimeout(r, 2500));
         out.subs = e._h.states['sensor.slotplanner_state'].attributes.settings.subs;
@@ -71,7 +86,10 @@ const api = async (p, body) => {
       check(/Car/.test(r.hint || ''), 'no hint after choosing a device');
       check(r.msg && r.msg !== '…' && /planned|gepland/i.test(r.msg), 'planning a free block did not report success: ' + r.msg);
       check(Array.isArray(r.carPlans) && Array.isArray(r.afterDel) && r.afterDel.length === r.carPlans.length - 1, 'removing the plan did not work');
-      check(r.conflict && r.conflict !== '…' && !/planned at|gepland om/i.test(r.conflict), 'a full block was accepted: ' + r.conflict);
+      check(JSON.stringify(r.fixture) === '["dishwasher","pool_pump"]', 'conflict fixture did not plan two devices in one block: ' + JSON.stringify(r.fixture));
+      check(r.conflictRan === true, 'the conflict request did not run (no full block)');
+      check(/two devices|twee toestellen/i.test(r.conflict || ''), 'a full block did not report the conflict: ' + r.conflict);
+      check(r.carAdded === 0, 'a full block accepted the car');
       check(r.subCount >= 1 && (r.subs || []).every((x) => x.sid), 'subscription not stored with an id');
       check((r.preview || 0) > 1000 && /<html/.test(r.previewStart || ''), 'report preview is empty');
       await p.waitForTimeout(300);

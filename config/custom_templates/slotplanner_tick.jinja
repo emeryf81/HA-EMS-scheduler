@@ -46,7 +46,8 @@
 {%- set fin.low = (fin.low + 1) if (fin.seen and W < x.finish_below_w | float(0)) else 0 -%}
 {%- set fin.v = fin.low >= [x.finish_after_min | int(0), 1] | max -%}
 {%- elif x.type == 'ev' -%}
-{%- set fin.v = sp_ev_full(d) | int == 1 and nu - (act.rs | int(nu)) >= 600 and W < 100 -%}
+{#- The target SOC ends the block whatever the charger still draws: the stop actions switch it off. -#}
+{%- set fin.v = sp_ev_full(d) | int == 1 and nu - (act.rs | int(nu)) >= 600 -%}
 {%- endif -%}
 {%- set f2 = dict(f, low=fin.low, idle=fin.idle, seen=fin.seen) -%}
 {%- set nextp = (mine | selectattr('st','eq','planned') | selectattr('s','eq',end) | list | first) | default(none) -%}
@@ -180,8 +181,16 @@
 {%- set skip = namespace(v=[]) -%}
 {%- for x in c.devices if x.id in busy -%}{%- set skip.v = skip.v + ([x.switch] if x.switch is defined and x.switch else []) + (x.climates if x.climates is defined else []) -%}{%- endfor -%}
 {%- set stale = S.touched | reject('in', own.v) | reject('in', skip.v) | list -%}
-{%- set still_on = stale | reject('is_state','off') | reject('is_state','unavailable') | reject('is_state','unknown') | list -%}
-{%- set gone = stale | reject('in', still_on) | list -%}
+{#- Only an entity that is off (or no longer exists) is forgotten. Unavailable and unknown ones stay
+    pending, so the switch-off is retried once they come back. -#}
+{%- set rel = namespace(gone=[], on=[]) -%}
+{%- for e in stale -%}
+{%- if states[e] is none or is_state(e, 'off') -%}{%- set rel.gone = rel.gone + [e] -%}
+{%- elif states(e) not in ['unavailable','unknown'] -%}{%- set rel.on = rel.on + [e] -%}
+{%- endif -%}
+{%- endfor -%}
+{%- set still_on = rel.on -%}
+{%- set gone = rel.gone -%}
 {%- if gone -%}{%- set R.ops = R.ops + [{'op':'touch','remove':gone}] -%}{%- endif -%}
 {%- if still_on -%}{%- set R.calls = R.calls + [{'script':'slotplanner_release','v':{'entities':still_on}}] -%}{%- endif -%}
 

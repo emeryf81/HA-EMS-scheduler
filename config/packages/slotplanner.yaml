@@ -20,7 +20,7 @@ template:
         attributes:
           config: "{% from 'slotplanner.jinja' import sp_cfg_j %}{{ sp_cfg_j() | from_json }}"
           errors: "{% from 'slotplanner.jinja' import sp_check_config_j %}{{ sp_check_config_j() | from_json }}"
-          version: "1.0.1"
+          version: "1.0.2"
 
   # ------------------------------------------------- planner state (written by script.slotplanner_write)
   - trigger:

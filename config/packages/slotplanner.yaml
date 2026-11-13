@@ -48,6 +48,7 @@ template:
         state: "{{ trigger.event.data.prices | count }}"
         attributes:
           prices: "{{ trigger.event.data.prices }}"
+          request: "{{ trigger.event.data.request }}"
           fetched: "{{ now().isoformat() }}"
 
   # ------------------------------------------------------- cheap blocks (script.slotplanner_find_slots)
@@ -136,6 +137,38 @@ script:
         timeout: "00:00:10"
         continue_on_timeout: true
 
+  slotplanner_transition:
+    alias: "Slotplanner: serialize device transitions"
+    mode: queued
+    max: 20
+    sequence:
+      - if: "{{ plan_id | default('') != '' }}"
+        then:
+          - action: script.slotplanner_remove
+            data:
+              plan_id: "{{ plan_id }}"
+        else:
+          - variables:
+              tick: "{% from 'slotplanner_tick.jinja' import sp_tick_j %}{{ sp_tick_j() | from_json }}"
+          - repeat:
+              for_each: "{{ tick.calls | selectattr('script', 'eq', 'slotplanner_stop') | list }}"
+              sequence:
+                - action: "script.{{ repeat.item.script }}"
+                  data: "{{ repeat.item.v }}"
+          - if:
+              - condition: template
+                value_template: "{{ tick.ops | count > 0 }}"
+            then:
+              - action: script.slotplanner_write
+                data:
+                  ops: "{{ tick.ops }}"
+          - repeat:
+              for_each: "{{ tick.calls | rejectattr('script', 'eq', 'slotplanner_stop') | list }}"
+              sequence:
+                - action: "script.{{ repeat.item.script }}"
+                  data: "{{ repeat.item.v }}"
+                  continue_on_error: true
+
   # ===================================================================== planning
   slotplanner_plan:
     alias: "Slotplanner: plan a device"
@@ -197,6 +230,12 @@ script:
           message: "{% from 'slotplanner.jinja' import sp_name %}{% from 'slotplanner_i18n.jinja' import t %}{{ sp_name(device) }}: {{ t('step_planned', (s | int) | timestamp_custom('%d/%m %H:%M')) }}"
 
   slotplanner_unplan:
+    sequence:
+      - action: script.slotplanner_transition
+        data:
+          plan_id: "{{ plan_id }}"
+
+  slotplanner_remove:
     alias: "Slotplanner: remove a plan"
     description: "Removes a plan. A running device is stopped first."
     icon: mdi:calendar-remove
@@ -322,12 +361,15 @@ script:
           - condition: template
             value_template: "{{ prices | count > 0 }}"
         then:
+          - variables:
+              price_request: "{{ now().isoformat() }}"
           - event: slotplanner_prices
             event_data:
               prices: "{{ prices }}"
-          - wait_template: "{{ states('sensor.slotplanner_prices') | int(0) == prices | count }}"
+              request: "{{ price_request }}"
+          - wait_template: "{{ state_attr('sensor.slotplanner_prices', 'request') == price_request }}"
             timeout: "00:00:05"
-            continue_on_timeout: true
+            continue_on_timeout: false
         else:
           - action: logbook.log
             data:
@@ -533,7 +575,7 @@ script:
             {% from 'slotplanner_i18n.jinja' import t %}
             {% set p = (state_attr('sensor.slotplanner_state', 'plans') or []) | selectattr('id', 'eq', plan_id) | list | first | default({}) %}
             {% set f = p.f | default({}) %}
-            {{ [{'op': 'touch', 'add': on_list}, {'op': 'set', 'id': plan_id, 'f': {'f': dict(f, on=1 if (on_list or f.on | default(0)) else 0)}}] +
+            {{ [{'op': 'touch', 'add': on_list}, {'op': 'set', 'id': plan_id, 'f': {'owned': ((p.owned | default([])) + on_list) | unique | list, 'f': dict(f, on=1 if (on_list or f.on | default(0)) else 0)}}] +
                ([{'op': 'step', 'id': plan_id, 'w': t('step_active', on_list | join(', ')), 'r': 'ok'}] if (on_list and not resume | default(false)) else []) }}
 
   slotplanner_stop:
@@ -562,12 +604,16 @@ script:
     sequence:
       - variables:
           x: "{% from 'slotplanner.jinja' import sp_dev_j %}{{ sp_dev_j(device) | from_json }}"
+          p: "{{ ((state_attr('sensor.slotplanner_state', 'plans') or []) | selectattr('id', 'eq', plan_id | default('')) | list | first) | default({}) }}"
           mine: >-
             {% set ents = ([x.switch] if x.switch is defined and x.switch else []) + (x.climates if x.climates is defined else []) %}
-            {{ ents | select('in', state_attr('sensor.slotplanner_state', 'touched') or []) | list }}
+            {{ ((entities | default([])) + ents + (p.owned | default([]))) | unique | select('in', state_attr('sensor.slotplanner_state', 'touched') or []) | list }}
+      - action: script.slotplanner_write
+        data:
+          ops: "{{ [{'op': 'set', 'id': plan_id, 'f': {'shutdown_pending': true}}] if plan_id | default('') else [] }}"
       - if:
           - condition: template
-            value_template: "{{ not quiet | default(false) }}"
+            value_template: "{{ not quiet | default(false) or p.shutdown_pending | default(false) }}"
         then:
           - repeat:
               for_each: "{{ mine }}"
@@ -575,21 +621,15 @@ script:
                 - action: "{{ 'climate.turn_off' if repeat.item.startswith('climate.') else 'homeassistant.turn_off' }}"
                   target:
                     entity_id: "{{ repeat.item }}"
-                  continue_on_error: true
           - repeat:
-              for_each: "{{ x.stop_actions }}"
+              for_each: "{{ x.stop_actions | default([]) }}"
               sequence:
                 - action: "{{ repeat.item.action }}"
                   target: "{{ repeat.item.target | default({}) }}"
                   data: "{{ repeat.item.data | default({}) }}"
-                  continue_on_error: true
-      - if:
-          - condition: template
-            value_template: "{{ not pause | default(false) }}"
-        then:
-          - action: script.slotplanner_write
-            data:
-              ops: "{{ [{'op': 'touch', 'remove': mine}] }}"
+      - action: script.slotplanner_write
+        data:
+          ops: "{{ [{'op': 'touch', 'remove': [] if pause | default(false) else mine}] + ([{'op': 'set', 'id': plan_id, 'f': {'shutdown_pending': false}}] if plan_id | default('') else []) }}"
 
   # ===================================================================== messages and e-mail
   slotplanner_notify:
@@ -708,21 +748,7 @@ automation:
       - trigger: time_pattern
         minutes: "/1"
     actions:
-      - variables:
-          tick: "{% from 'slotplanner_tick.jinja' import sp_tick_j %}{{ sp_tick_j() | from_json }}"
-      - if:
-          - condition: template
-            value_template: "{{ tick.ops | count > 0 }}"
-        then:
-          - action: script.slotplanner_write
-            data:
-              ops: "{{ tick.ops }}"
-      - repeat:
-          for_each: "{{ tick.calls }}"
-          sequence:
-            - action: "script.{{ repeat.item.script }}"
-              data: "{{ repeat.item.v }}"
-              continue_on_error: true
+      - action: script.slotplanner_transition
 
   - id: slotplanner_schedule
     alias: "Slotplanner: daily schedule"
@@ -739,53 +765,57 @@ automation:
       - variables:
           g: "{% from 'slotplanner.jinja' import sp_cfg_j %}{{ (sp_cfg_j() | from_json).general }}"
           hm: "{{ now().strftime('%H:%M') }}"
-      - choose:
-          - conditions: "{{ trigger.id == 'start' }}"
-            sequence:
-              - delay:
-                  seconds: 30
-              - event: slotplanner_reload
-              - action: script.slotplanner_fetch_prices
-              - if:
-                  - condition: template
-                    value_template: "{{ states('sensor.slotplanner_slots') in ['unknown', 'unavailable', '0'] }}"
-                then:
-                  - action: script.slotplanner_find_slots
-          - conditions: "{{ hm == g.fetch_time }}"
-            sequence:
-              - action: script.slotplanner_refresh
-          - conditions: "{{ hm == g.autoplan_time }}"
-            sequence:
-              - action: script.slotplanner_autoplan
-          - conditions: "{{ hm == g.report_time }}"
-            sequence:
-              - variables:
-                  st: "{% from 'slotplanner.jinja' import sp_settings_j %}{{ sp_settings_j() | from_json }}"
-                  y: "{{ (now() - timedelta(days=1)).strftime('%Y-%m-%d') }}"
-              - if:
-                  - condition: template
-                    value_template: "{{ st.nightly | count > 0 }}"
-                then:
-                  - action: script.slotplanner_mail
-                    data:
-                      report: night
-                      day: "{{ y }}"
-                      people: "{{ st.nightly }}"
-              - if:
-                  - condition: template
-                    value_template: "{{ st.overview | count > 0 and (now().weekday() == 0 or now().day == 1) }}"
-                then:
-                  - action: script.slotplanner_mail
-                    data:
-                      report: "{{ 'year' if (now().month == 1 and now().day == 1) else ('month' if now().day == 1 else 'week') }}"
-                      people: "{{ st.overview }}"
-              - action: script.slotplanner_write
+      - if: "{{ trigger.id == 'start' }}"
+        continue_on_error: true
+        then:
+          - delay:
+              seconds: 30
+          - event: slotplanner_reload
+          - action: script.slotplanner_fetch_prices
+          - if:
+              - condition: template
+                value_template: "{{ states('sensor.slotplanner_slots') in ['unknown', 'unavailable', '0'] }}"
+            then:
+              - action: script.slotplanner_find_slots
+      - if: "{{ hm == g.fetch_time }}"
+        continue_on_error: true
+        then:
+          - action: script.slotplanner_refresh
+      - if: "{{ hm == g.autoplan_time }}"
+        continue_on_error: true
+        then:
+          - action: script.slotplanner_autoplan
+      - if: "{{ hm == g.report_time }}"
+        continue_on_error: true
+        then:
+          - variables:
+              st: "{% from 'slotplanner.jinja' import sp_settings_j %}{{ sp_settings_j() | from_json }}"
+              y: "{{ (now() - timedelta(days=1)).strftime('%Y-%m-%d') }}"
+          - if:
+              - condition: template
+                value_template: "{{ st.nightly | count > 0 }}"
+            then:
+              - action: script.slotplanner_mail
                 data:
-                  ops: >-
-                    {% from 'slotplanner.jinja' import sp_settings_j %}
-                    {% set st = sp_settings_j() | from_json %}{% set today = now().strftime('%Y-%m-%d') %}
-                    {% set ns = namespace(v=[]) %}{% for a in st.subs if not a.until or a.until >= today %}{% set ns.v = ns.v + [a] %}{% endfor %}
-                    {{ [{'op': 'settings', 'f': {'subs': ns.v}}] }}
-          - conditions: "{{ now().minute == 5 }}"
-            sequence:
-              - action: script.slotplanner_fetch_prices
+                  report: night
+                  day: "{{ y }}"
+                  people: "{{ st.nightly }}"
+          - if:
+              - condition: template
+                value_template: "{{ st.overview | count > 0 and (now().weekday() == 0 or now().day == 1) }}"
+            then:
+              - action: script.slotplanner_mail
+                data:
+                  report: "{{ 'year' if (now().month == 1 and now().day == 1) else ('month' if now().day == 1 else 'week') }}"
+                  people: "{{ st.overview }}"
+          - action: script.slotplanner_write
+            data:
+              ops: >-
+                {% from 'slotplanner.jinja' import sp_settings_j %}
+                {% set st = sp_settings_j() | from_json %}{% set today = now().strftime('%Y-%m-%d') %}
+                {% set ns = namespace(v=[]) %}{% for a in st.subs if not a.until or a.until >= today %}{% set ns.v = ns.v + [a] %}{% endfor %}
+                {{ [{'op': 'settings', 'f': {'subs': ns.v}}] }}
+      - if: "{{ now().minute == 5 }}"
+        continue_on_error: true
+        then:
+          - action: script.slotplanner_fetch_prices

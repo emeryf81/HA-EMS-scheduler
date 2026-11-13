@@ -39,7 +39,7 @@
 {%- set fin = namespace(v=false, low=f.low | default(0) | int, idle=f.idle | default(0) | int, seen=f.seen | default(0) | int) -%}
 {%- if k.running -%}{%- set fin.seen = 1 -%}{%- endif -%}
 {%- if x.type == 'appliance' or (x.type == 'custom' and x.running_entity) -%}
-{%- set fin.idle = (fin.idle + 1) if (fin.seen and not k.running) else 0 -%}
+{%- set fin.idle = (fin.idle + 1) if (fin.seen and not k.running and states(x.status if x.type == 'appliance' else x.running_entity) not in ['unknown','unavailable']) else 0 -%}
 {%- set fin.v = fin.idle >= 2 -%}
 {%- elif x.type == 'switch' and x.finish_below_w | float(0) > 0 and x.power_sensor -%}
 {%- set fin.low = (fin.low + 1) if (fin.seen and W < x.finish_below_w | float(0)) else 0 -%}
@@ -65,13 +65,13 @@
 {%- if x.type != 'appliance' -%}{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':d,'plan_id':act.id}}] -%}{%- endif -%}
 {%- set R.calls = R.calls + [{'script':'slotplanner_notify','v':{'kind':'step','device':d,'r':'ok','message':t('step_finished')}}] -%}
 
-{%- elif nu >= end and nextp -%}
+{%- elif nu >= end and nextp and set_.enabled -%}
 {%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'st':'done','f':f2,'e':nu}},
   {'op':'step','id':act.id,'w':t('step_continue'),'r':'ok'},
-  {'op':'set','id':nextp.id,'f':{'st':'active','rs':nextp.s,'f':{'on':f.on | default(0),'seen':fin.seen}}},
+  {'op':'set','id':nextp.id,'f':{'st':'active','rs':nextp.s,'owned':act.owned | default([]),'f':{'on':f.on | default(0),'seen':fin.seen,'paused':f.paused | default(0)}}},
   {'op':'step','id':nextp.id,'w':t('step_continue'),'r':'ok'}] -%}
 
-{%- elif nu >= end and x.type == 'appliance' and k.running and nu < end + 7200 -%}
+{%- elif nu >= end and (not nextp or set_.enabled) and x.type == 'appliance' and k.running and nu < end + 7200 -%}
 {%- if not f.over | default(0) -%}
 {%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'f':dict(f2, over=1)}},{'op':'step','id':act.id,'w':t('step_overrun'),'r':'info'}] -%}
 {%- else -%}{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'f':f2}}] -%}{%- endif -%}
@@ -164,10 +164,11 @@
 {%- for x in c.devices if x.id in actd -%}{%- set keep.v = keep.v + ([x.switch] if x.switch is defined and x.switch else []) + (x.climates if x.climates is defined else []) -%}{%- endfor -%}
 {%- set stale = S.touched | reject('in', keep.v) | list -%}
 {%- if stale and not R.calls | selectattr('script','eq','slotplanner_start') | list and not R.calls | selectattr('script','eq','slotplanner_stop') | list -%}
-{%- set R.ops = R.ops + [{'op':'touch','remove':stale}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':'','entities':stale}}] -%}
 {%- endif -%}
 {#- Plans of a device that is no longer in the configuration stay until their block is over. -#}
 {%- for p in S.plans if p.d not in (c.devices | map(attribute='id') | list) and nu >= p.s | int + B -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':p.d,'plan_id':p.id}}] -%}
 {%- set R.ops = R.ops + [{'op':'del','id':p.id,'archive':false}] -%}
 {%- endfor -%}
 

@@ -46,7 +46,7 @@
 {%- set fin.low = (fin.low + 1) if (fin.seen and W < x.finish_below_w | float(0)) else 0 -%}
 {%- set fin.v = fin.low >= [x.finish_after_min | int(0), 1] | max -%}
 {%- elif x.type == 'ev' -%}
-{%- set fin.v = sp_ev_full(d) | int == 1 and nu - (act.rs | int(nu)) >= 600 and W < 100 -%}
+{%- set fin.v = sp_ev_full(d) | int == 1 -%}
 {%- endif -%}
 {%- set f2 = dict(f, low=fin.low, idle=fin.idle, seen=fin.seen) -%}
 {%- set nextp = (mine | selectattr('st','eq','planned') | selectattr('s','eq',end) | list | first) | default(none) -%}
@@ -180,8 +180,8 @@
 {%- set skip = namespace(v=[]) -%}
 {%- for x in c.devices if x.id in busy -%}{%- set skip.v = skip.v + ([x.switch] if x.switch is defined and x.switch else []) + (x.climates if x.climates is defined else []) -%}{%- endfor -%}
 {%- set stale = S.touched | reject('in', own.v) | reject('in', skip.v) | list -%}
-{%- set still_on = stale | reject('is_state','off') | reject('is_state','unavailable') | reject('is_state','unknown') | list -%}
-{%- set gone = stale | reject('in', still_on) | list -%}
+{%- set still_on = stale | reject('is_state','off') | list -%}
+{%- set gone = stale | select('is_state','off') | list -%}
 {%- if gone -%}{%- set R.ops = R.ops + [{'op':'touch','remove':gone}] -%}{%- endif -%}
 {%- if still_on -%}{%- set R.calls = R.calls + [{'script':'slotplanner_release','v':{'entities':still_on}}] -%}{%- endif -%}
 

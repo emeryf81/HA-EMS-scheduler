@@ -53,9 +53,26 @@ const api = async (p, body) => {
         const pid = 'car:' + free.dataset.slot;
         const del = R.querySelector(`[data-del="${pid}"]`); if (del) del.click(); await new Promise((r) => setTimeout(r, 2500));
         out.afterDel = (e._h.states['sensor.slotplanner_state'].attributes.plans || []).filter((x) => x.d === 'car').map((x) => x.s);
-        // conflict: dishwasher in the block that already holds dishwasher + pool
-        e._sel = 'car'; const blk = [...R.querySelectorAll('.blk.full')][0]; if (blk) blk.click(); await new Promise((r) => setTimeout(r, 9000));
-        out.conflict = (e.shadowRoot.querySelector('.msg') || {}).textContent;
+        // Establish a full block so this request always exercises the conflict path.
+        const slot = e._slots().find((s) => s.e > Date.now() / 1000 && !e._plans().some((p) => p.s === s.s));
+        if (!slot) throw new Error('no empty block for the conflict fixture');
+        const fixtures = ['dishwasher', 'pool_pump'];
+        await window.haApi('/api/services/script/slotplanner_write', { ops: fixtures.map((d) => ({ op: 'add', d, s: slot.s })) });
+        try {
+          e.hass = await window.mk(); e._sel = 'car'; e._sig = ''; e._render();
+          const blk = R.querySelector(`.blk.full[data-slot="${slot.s}"]`);
+          if (!blk) throw new Error('occupied-block fixture was not rendered');
+          const before = JSON.stringify(e._plans()); const callCount = window.calls.length;
+          blk.click(); await new Promise((r) => setTimeout(r, 11000));
+          out.conflict = (R.querySelector('.msg') || {}).textContent;
+          const request = window.calls.slice(callCount).find((c) => c[1] === 'slotplanner_plan');
+          const last = (e._a('sensor.slotplanner_state', 'settings') || {}).last;
+          out.conflictExecuted = !!request && request[2].start === slot.s && last && last.req === request[2].req && last.ok === false;
+          out.conflictUnchanged = JSON.stringify(e._plans()) === before;
+        } finally {
+          await window.haApi('/api/services/script/slotplanner_write', { ops: fixtures.map((d) => ({ op: 'del', id: d + ':' + slot.s, archive: false })) });
+          e.hass = await window.mk();
+        }
         e._tab = 'reports'; e._sig = ''; e._render();
         e.shadowRoot.querySelector('[data-sl="all"]').click(); e.shadowRoot.querySelector('[data-act="subadd"]').click(); await new Promise((r) => setTimeout(r, 2500));
         out.subs = e._h.states['sensor.slotplanner_state'].attributes.settings.subs;
@@ -71,7 +88,9 @@ const api = async (p, body) => {
       check(/Car/.test(r.hint || ''), 'no hint after choosing a device');
       check(r.msg && r.msg !== '…' && /planned|gepland/i.test(r.msg), 'planning a free block did not report success: ' + r.msg);
       check(Array.isArray(r.carPlans) && Array.isArray(r.afterDel) && r.afterDel.length === r.carPlans.length - 1, 'removing the plan did not work');
-      check(r.conflict && r.conflict !== '…' && !/planned at|gepland om/i.test(r.conflict), 'a full block was accepted: ' + r.conflict);
+      check(r.conflictExecuted === true, 'conflict request did not return a matching rejection');
+      check(['This block already holds two devices.', 'In dit blok staan al twee toestellen.'].includes(r.conflict), 'unexpected conflict result: ' + r.conflict);
+      check(r.conflictUnchanged === true, 'conflict request changed the plan');
       check(r.subCount >= 1 && (r.subs || []).every((x) => x.sid), 'subscription not stored with an id');
       check((r.preview || 0) > 1000 && /<html/.test(r.previewStart || ''), 'report preview is empty');
       await p.waitForTimeout(300);

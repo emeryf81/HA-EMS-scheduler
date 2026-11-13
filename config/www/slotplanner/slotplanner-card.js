@@ -38,7 +38,7 @@ const I18N = {
     enabledSub: 'Off: nothing starts and running switches, climate and chargers stop. The plan stays.', cfgFile: 'Change devices and sources in custom_templates/slotplanner_config.jinja, then run script Slotplanner: reload configuration.',
     blockLen: 'Block length {0} h, {1} blocks per day.', prices: 'Prices: {0}', solar: 'Solar: {0}', reload: 'Reload configuration',
     learned: 'Learned', learnedSub: 'After two runs the planner uses the measured peak and run time.',
-    wOff: 'not reachable', wDoor: 'door open', wRemote: 'remote start is off', wProg: 'no program set ({0})', wCable: 'car not connected',
+    wNotReady: 'device not ready', wOff: 'not reachable', wDoor: 'door open', wRemote: 'remote start is off', wProg: 'no program set ({0})', wCable: 'car not connected',
     error: 'Error: {0}', noAnswer: 'No answer from Home Assistant. Check the plan or try again.', ready: 'ready', notReady: 'not ready: {0}', stParked: 'paused',
   },
   nl: {
@@ -73,7 +73,7 @@ const I18N = {
     enabledSub: 'Uit: er start niets en lopende schakelaars, airco\'s en laadpalen stoppen. De planning blijft.', cfgFile: 'Toestellen en bronnen pas je aan in custom_templates/slotplanner_config.jinja. Draai daarna script Slotplanner: reload configuration.',
     blockLen: 'Blokken van {0} u, {1} per dag.', prices: 'Prijzen: {0}', solar: 'Zon: {0}', reload: 'Configuratie herladen',
     learned: 'Geleerd', learnedSub: 'Na twee keer gebruikt de planner het gemeten piekvermogen en de looptijd.',
-    wOff: 'niet bereikbaar', wDoor: 'deur open', wRemote: 'starten op afstand staat uit', wProg: 'geen programma gekozen ({0})', wCable: 'auto niet aangesloten',
+    wNotReady: 'toestel niet klaar', wOff: 'niet bereikbaar', wDoor: 'deur open', wRemote: 'starten op afstand staat uit', wProg: 'geen programma gekozen ({0})', wCable: 'auto niet aangesloten',
     error: 'Fout: {0}', noAnswer: 'Geen antwoord van Home Assistant. Kijk de planning na of probeer opnieuw.', ready: 'staat klaar', notReady: 'niet klaar: {0}', stParked: 'gepauzeerd',
   },
 };
@@ -100,7 +100,7 @@ class SlotplannerCard extends HTMLElement {
     this._h = h;
     if (!this.shadowRoot) { this.attachShadow({ mode: 'open' }); this._timer = setInterval(() => { this._sig = ''; this._render(); }, 30000); }
     const ids = ['config', 'state', 'slots', 'prices', 'history', 'stats'].map((k) => `sensor.slotplanner_${k}`);
-    const devs = (this._cfg().devices || []).flatMap((d) => [d.status, d.switch, d.power_sensor, d.soc, d.cable, d.door, d.remote].filter(Boolean));
+    const devs = (this._cfg().devices || []).flatMap((d) => [d.status, d.switch, d.power_sensor, d.soc, d.cable, d.door, d.remote, d.ready_entity].filter(Boolean));
     const sig = ids.concat(devs).map((e) => (h.states[e] ? h.states[e].last_updated : '')).join('|') + this._tab;
     if (sig === this._sig) return;
     this._sig = sig;
@@ -145,6 +145,7 @@ class SlotplannerCard extends HTMLElement {
       run = (x.climates || []).some((c) => !['off', 'unavailable', 'unknown'].includes(st(c)));
       if ((x.climates || []).every((c) => st(c) === 'unavailable')) why.push(this._t('wOff'));
     } else if (x.type === 'ev' && x.cable && st(x.cable) === 'off') why.push(this._t('wCable'));
+    if (x.type === 'custom' && x.ready_entity && st(x.ready_entity) !== 'on') why.push(this._t('wNotReady'));
     return { ready: !why.length, running: run, why: why.join(', ') };
   }
   _res(p) {
@@ -215,7 +216,7 @@ class SlotplannerCard extends HTMLElement {
     const month = stats && stats.attributes.month ? (stats.attributes.month[mk] || {}).bes || 0 : 0;
     const hist = this._a('sensor.slotplanner_history', 'runs') || [];
     const savedToday = plans.concat(hist).filter((p, i, arr) => p.s >= t0 && arr.findIndex((q) => q.id === p.id) === i).reduce((a, p) => a + ((p.m || {}).bes || 0), 0);
-    const rel = cur && avg ? Math.round((1 - cur[1] / avg) * 100) : 0;
+    const rel = cur && avg ? Math.round((avg - cur[1]) / Math.abs(avg) * 100) : 0;
     let h = `<div class="kpis">
       <div class="k"><div class="kl">${this._t('priceNow')}</div><div class="kv ${rel >= 0 ? 'good' : 'bad'}">${cur ? this._num(cur[1] * 100, 1) + ' ct' : '-'}</div><div class="ks">${cur && avg ? (rel >= 0 ? this._t('belowAvg', rel) : this._t('aboveAvg', -rel)) : ''}</div></div>
       <div class="k"><div class="kl">${this._t('cheapest')}</div><div class="kv">${best ? this._num(best.p, 1) + ' ct' : '-'}</div><div class="ks">${best ? this._dhm(best.s) : ''}</div></div>
@@ -271,7 +272,10 @@ class SlotplannerCard extends HTMLElement {
     const days = this._chartDay || 0;
     const da = new Date(d0); da.setDate(da.getDate() + days); const db = new Date(da); db.setDate(db.getDate() + 1);
     const a = da.getTime() / 1000; const b = db.getTime() / 1000; const NQ = Math.round((b - a) / 900);
-    const q = pr.filter((x) => x[0] >= a && x[0] < b); if (!q.length) return '';
+    const q = pr.filter((x) => x[0] >= a && x[0] < b); if (!q.length) {
+      if (days) { this._chartDay = 0; return this._chart(pr, slots, plans); }
+      return `<div class="chh"><button class="mini" data-cday="1">▶</button></div><div class="empty">${this._t('noPrices')}</div>`;
+    }
     const vals = q.map((x) => x[1]); const mn = Math.min(...vals); const mx = Math.max(...vals); const sp = Math.max(mx - mn, 0.001);
     const W = 960; const H = 200; const bw = W / NQ; const y = (v) => H - 14 - ((v - mn) / sp) * (H - 50);
     const col = (v) => { const r = (v - mn) / sp; return r < 0.33 ? '#84cc16' : r < 0.66 ? '#eab308' : r < 0.85 ? '#f97316' : '#ef4444'; };

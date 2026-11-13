@@ -133,10 +133,20 @@
 {{- hit[0][1] if hit else ((p | map(attribute=1) | sum / p | count) if p else 0) -}}
 {%- endmacro -%}
 
+{#- Start and end (epoch) of the local day in the Home Assistant time zone. x is an epoch or a date 'YYYY-MM-DD'.
+    Days of 23 or 25 hours (daylight saving) are handled. -#}
+{%- macro sp_day_j(x) -%}
+{%- set d = as_datetime(x ~ 'T12:00:00').date() if x is string else as_local(as_datetime(x | int)).date() -%}
+{%- set tz = now().tzinfo -%}
+{%- set a = as_datetime(d.isoformat() ~ 'T00:00:00').replace(tzinfo=tz) -%}
+{%- set b = as_datetime((d + timedelta(days=1)).isoformat() ~ 'T00:00:00').replace(tzinfo=tz) -%}
+{{- [as_timestamp(a) | int, as_timestamp(b) | int] | tojson -}}
+{%- endmacro -%}
+
 {#- Mean price of the local day that holds ts. -#}
 {%- macro sp_day_mean(ts) -%}
-{%- set d0 = as_timestamp(as_datetime(ts | int).astimezone().replace(hour=0, minute=0, second=0, microsecond=0)) | int -%}
-{%- set p = (sp_prices_j() | from_json) | selectattr(0,'ge',d0) | selectattr(0,'lt',d0 + 86400) | map(attribute=1) | list -%}
+{%- set dd = sp_day_j(ts | int) | from_json -%}
+{%- set p = (sp_prices_j() | from_json) | selectattr(0,'ge',dd[0]) | selectattr(0,'lt',dd[1]) | map(attribute=1) | list -%}
 {{- (p | sum / p | count) if p else sp_price_at(ts) -}}
 {%- endmacro -%}
 
@@ -162,7 +172,7 @@
 {%- set today = now().date() -%}
 {%- set ev = states(s.today) | float(0) if s.today else 0 -%}{%- set em = states(s.tomorrow) | float(0) if s.tomorrow else 0 -%}
 {%- for t in ts_list -%}
-{%- set d = as_datetime(t | int).astimezone() -%}{%- set m = d.hour * 60 + d.minute + 7.5 -%}
+{%- set d = as_local(as_datetime(t | int)) -%}{%- set m = d.hour * 60 + d.minute + 7.5 -%}
 {%- set E = ev if d.date() == today else (em if (d.date() - today).days == 1 else 0) -%}
 {%- set fz = fo if d.hour < 11 else (fm if d.hour < 16 else fa) -%}
 {%- set z = (E / (D / 60) * 2 * (sin(pi * (m - a) / D)) ** 2) * fz if (m > a and m < b) else 0 -%}
@@ -174,7 +184,7 @@
 {%- set t0 = as_timestamp(x.period_start, 0) | int -%}{%- set det.m = dict(det.m, **{(t0 | string): x.pv_estimate | float(0), ((t0 + 900) | string): x.pv_estimate | float(0)}) -%}
 {%- endfor -%}{%- endfor -%}
 {%- for t in ts_list -%}
-{%- set d = as_datetime(t | int).astimezone() -%}{%- set fz = fo if d.hour < 11 else (fm if d.hour < 16 else fa) -%}
+{%- set d = as_local(as_datetime(t | int)) -%}{%- set fz = fo if d.hour < 11 else (fm if d.hour < 16 else fa) -%}
 {%- set ns.d = dict(ns.d, **{(t | int | string): ((det.m.get(t | int | string, 0)) * fz) | round(3)}) -%}
 {%- endfor -%}
 {%- else -%}
@@ -200,10 +210,11 @@
 {%- macro sp_check_j(d) -%}
 {%- set x = sp_dev_j(d) | from_json -%}
 {%- set na = ['unavailable','unknown'] -%}
-{%- set ns = namespace(ready=true, run=false, why=[]) -%}
+{%- set ns = namespace(ready=true, run=false, why=[], known=true) -%}
 {%- if not x -%}{%- set ns.ready = false -%}{%- set ns.why = [t('why_unknown')] -%}
 {%- elif x.type == 'appliance' -%}
 {%- set st = states(x.status) -%}
+{%- set ns.known = st not in na -%}
 {%- set ns.run = st in x.running_states or st in x.pause_states -%}
 {%- if st in na -%}{%- set ns.why = ns.why + [t('why_offline')] -%}{%- endif -%}
 {%- if x.door and is_state(x.door,'on') -%}{%- set ns.why = ns.why + [t('why_door')] -%}{%- endif -%}
@@ -223,9 +234,9 @@
 {%- if not ok -%}{%- set ns.ready = false -%}{%- set ns.why = [t('why_offline')] -%}{%- endif -%}
 {%- elif x.type == 'custom' -%}
 {%- if x.ready_entity and not is_state(x.ready_entity,'on') -%}{%- set ns.ready = false -%}{%- set ns.why = [t('why_notready')] -%}{%- endif -%}
-{%- if x.running_entity -%}{%- set ns.run = is_state(x.running_entity,'on') -%}{%- endif -%}
+{%- if x.running_entity -%}{%- set ns.run = is_state(x.running_entity,'on') -%}{%- set ns.known = states(x.running_entity) not in na -%}{%- endif -%}
 {%- endif -%}
-{{- {'ready': ns.ready, 'running': ns.run, 'reason': ns.why | join(', ')} | tojson -}}
+{{- {'ready': ns.ready, 'running': ns.run, 'known': ns.known, 'reason': ns.why | join(', ')} | tojson -}}
 {%- endmacro -%}
 
 {#- Live power of a device in W (0 without a power sensor). -#}
@@ -279,7 +290,14 @@
 
 {#- ----------------------------------------------------------- planning -#}
 {#- Window of a plan: [start, end]. Early or real starts move the window. -#}
-{%- macro sp_window_j(p, B) -%}{%- set s = p.rs if (p.rs | default(0) | int) > 0 else p.s -%}{{ [s | int, (s | int) + (B | int)] | tojson }}{%- endmacro -%}
+{%- macro sp_window_j(p, B) -%}
+{%- set s = p.rs if (p.rs | default(0) | int > 0 and p.rs | int < p.s | int) else p.s -%}
+{%- set e = s | int + B | int -%}
+{#- An active plan that runs past its block (an appliance that is not finished yet) keeps its place. -#}
+{%- set nu = as_timestamp(now()) | int -%}
+{%- if p.st == 'active' and e <= nu -%}{%- set e = nu + 900 -%}{%- endif -%}
+{{- [s | int, e] | tojson -}}
+{%- endmacro -%}
 
 {#- Plans that still hold a block: [[device, start], ...] -#}
 {%- macro sp_busy_j() -%}
@@ -322,16 +340,16 @@
 {#- Score 0..100 of the block that starts at s, compared with every block of that day. -#}
 {%- macro sp_score(s) -%}
 {%- set c = sp_cfg_j() | from_json -%}{%- set B = c.general.block_hours | int * 3600 -%}{%- set Q = B // 900 -%}
-{%- set d0 = as_timestamp(as_datetime(s | int).astimezone().replace(hour=0, minute=0, second=0, microsecond=0)) | int -%}
-{%- set p = (sp_prices_j() | from_json) | selectattr(0,'ge',d0) | selectattr(0,'lt',d0 + 86400 + B) | list -%}
+{%- set dd = sp_day_j(s | int) | from_json -%}{%- set d0 = dd[0] -%}{%- set d1 = dd[1] -%}
+{%- set p = (sp_prices_j() | from_json) | selectattr(0,'ge',d0) | selectattr(0,'lt',d1 + B) | list -%}
 {%- set z = sp_solar_j(p | map(attribute=0) | list) | from_json -%}
 {%- set inj = sp_feed_in() | float(0) -%}{%- set cov = [c.solar.covers_kw | float(2), 0.1] | max -%}
 {%- set W = namespace(v=[], me=none) -%}
-{%- for j in range(0, [p | count - Q + 1, 0] | max) if p[j][0] < d0 + 86400 -%}
+{%- for j in range(0, [p | count - Q + 1, 0] | max) if p[j][0] < d1 -%}
 {%- if p[j + Q - 1][0] == p[j][0] + B - 900 -%}
 {%- set raw = p[j:j + Q] | map(attribute=1) | sum / Q -%}
-{%- set zz = namespace(s=0) -%}{%- for x in p[j:j + Q] -%}{%- set zz.s = zz.s + z.get(x[0] | string, 0) | float(0) -%}{%- endfor -%}
-{%- set f = [zz.s / Q / cov, 1] | min -%}{%- set eff = raw * (1 - f) + inj * f -%}
+{%- set ee = namespace(s=0) -%}{%- for x in p[j:j + Q] -%}{%- set f = [z.get(x[0] | string, 0) | float(0) / cov, 1] | min -%}{%- set ee.s = ee.s + x[1] * (1 - f) + inj * f -%}{%- endfor -%}
+{%- set eff = ee.s / Q -%}
 {%- set W.v = W.v + [[raw, eff]] -%}{%- if p[j][0] == s | int -%}{%- set W.me = eff -%}{%- endif -%}
 {%- endif -%}
 {%- endfor -%}
@@ -376,11 +394,13 @@
 {%- macro sp_free_slot(d, min_left) -%}
 {%- set c = sp_cfg_j() | from_json -%}{%- set x = sp_dev_j(d) | from_json -%}
 {%- set kw = [sp_peak_kw(d) | float(2), 0.1] | max -%}
-{%- set inj = sp_feed_in() | float(0) * 100 -%}{%- set nu = as_timestamp(now()) | int -%}
+{%- set nu = as_timestamp(now()) | int -%}
+{%- set q = sp_quarters_j(nu // 900 * 900 - 3 * 3600, kw) | from_json -%}
 {%- set b = namespace(c=999999.0, s=0) -%}
 {%- for sl in state_attr('sensor.slotplanner_slots','slots') or [] if sl.e - nu >= min_left | int(0) -%}
 {%- if (sp_conflict(d, sl.s, '') | trim) == '' -%}
-{%- set f = [sl.z | float(0) / kw, 1] | min -%}{%- set cost = sl.p * (1 - f) + inj * f -%}
+{%- set qq = q | selectattr(0,'ge',[sl.s, nu // 900 * 900] | max) | selectattr(0,'lt',sl.e) | map(attribute=3) | list -%}
+{%- set cost = (qq | sum / qq | count) if qq else sl.p / 100 -%}
 {%- if cost < b.c -%}{%- set b.c = cost -%}{%- set b.s = sl.s -%}{%- endif -%}
 {%- endif -%}
 {%- endfor -%}
@@ -395,10 +415,10 @@
 {%- if x.type == 'appliance' and m > 0 -%}
 {%- set n = [((m + 10) / 15) | round(0, 'ceil') | int, 1] | max -%}
 {%- if n < Q -%}
-{%- set p = (sp_prices_j() | from_json) | selectattr(0,'ge',s | int) | selectattr(0,'lt',s | int + B) | list -%}
+{%- set p = (sp_quarters_j(s | int, sp_peak_kw(d)) | from_json) | selectattr(0,'lt',s | int + B) | list -%}
 {%- if p | count == Q -%}
 {%- set b = namespace(c=none, j=0) -%}
-{%- for j in range(0, Q - n + 1) -%}{%- set v = p[j:j + n] | map(attribute=1) | sum -%}{%- if b.c is none or v < b.c - 0.0001 -%}{%- set b.c = v -%}{%- set b.j = j -%}{%- endif -%}{%- endfor -%}
+{%- for j in range(0, Q - n + 1) -%}{%- set v = p[j:j + n] | map(attribute=3) | sum -%}{%- if b.c is none or v < b.c - 0.0001 -%}{%- set b.c = v -%}{%- set b.j = j -%}{%- endif -%}{%- endfor -%}
 {{- b.j * 900 -}}
 {%- else -%}0{%- endif -%}
 {%- else -%}0{%- endif -%}

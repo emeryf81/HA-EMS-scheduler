@@ -13,7 +13,7 @@ Everything runs inside Home Assistant as a package: templates, scripts and two a
 - **Plans devices.** Tap a device and a block in the card, or let the planner do it at midnight: appliances as soon as they are loaded and ready, the car with as many blocks as it needs to reach its target, pumps and climate devices once a day.
 - **Respects your capacity tariff.** Two devices may share a block only if they stay under this month's peak. Never more than two per block.
 - **Starts and stops devices.** Remote start for appliances (Miele and any brand with a status sensor and a start button), switches, climate entities, EV chargers, or your own actions. Appliances with a known run time start in the cheapest part of their block.
-- **Follows every run.** It notices when a program is finished and frees the rest of the block, when the car is full, when someone switches a device off by hand, when a device started earlier than planned, and when a pause entity (your own peak guard) is on.
+- **Follows every run.** It notices when a program is finished and frees the rest of the block, when the car is full, when someone switches a device off by hand, when a device started earlier than planned, and when a pause entity (your own peak guard) is on. A device that loses its connection is not taken for finished, and whatever the planner switched on is switched off again, also after a failed attempt or when you remove a device from the configuration.
 - **Measures.** kWh, the part that came from the grid, the cost per quarter hour and the saving compared with the average price of the day. After two runs it learns the real peak power and run time of each device.
 - **Explains what went wrong.** Every run keeps a timeline of steps. When a start fails it gives the most likely cause (door open, remote start off, no program set, offline) and plans the device again once.
 - **Reports.** A nightly e-mail, week, month and year overviews, and e-mails on demand. Phone messages per person, per device, for as long as you want.
@@ -147,7 +147,9 @@ Every device can also run extra `start_actions` and `stop_actions` in the same f
 | `script.slotplanner_autoplan` | |
 | `script.slotplanner_refresh` | fetch prices and find blocks |
 | `script.slotplanner_clear` | remove every block that did not start |
-| `script.slotplanner_settings` | `settings`: `enabled`, `autoplan`, `subs`, `nightly`, `overview`, `early`, `remind` |
+| `script.slotplanner_settings` | `settings`: `enabled`, `autoplan` (merged per device), `nightly`, `overview`, `early`, `remind` |
+| `script.slotplanner_write` | `ops`: the only way the state changes. Besides plan operations it takes `sub_add`, `sub_del` and `list_set` for message settings, see `slotplanner_store.jinja` |
+| `script.slotplanner_release` | `entities`: switches off what the planner switched on but no block owns any more. The executor calls it every minute until they are off |
 | `script.slotplanner_mail` | `report` (today, day, night, week, month, year, diagnostics, plan, all), `day`, `days`, `devices`, `people` |
 | `script.slotplanner_reload` | reload the configuration |
 

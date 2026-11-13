@@ -2,7 +2,7 @@
 input_select:
   mock_dishwasher_status:
     name: Mock dishwasher status
-    options: ["off", "programmed", "in_use", "end"]
+    options: ["off", "programmed", "in_use", "end", "lost"]
     initial: "programmed"
 input_boolean:
   mock_dishwasher_door:
@@ -47,6 +47,8 @@ template:
   - sensor:
       - name: "Dishwasher status"
         unique_id: mock_dishwasher_status_sensor
+        # "lost" simulates a dishwasher that drops off the network.
+        availability: "{{ not is_state('input_select.mock_dishwasher_status', 'lost') }}"
         state: "{{ states('input_select.mock_dishwasher_status') }}"
       - name: "Dishwasher plug power"
         unique_id: mock_dishwasher_power

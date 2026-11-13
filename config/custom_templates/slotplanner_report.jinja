@@ -1,6 +1,6 @@
 {#- Slotplanner e-mail reports (HTML). Used by script.slotplanner_mail and the preview in the card.
     Kinds: today, day, night, week, month, year, diagnostics, plan, all. -#}
-{%- from 'slotplanner.jinja' import sp_cfg_j, sp_state_j, sp_check_j, sp_score, sp_prices_j, sp_settings_j -%}
+{%- from 'slotplanner.jinja' import sp_cfg_j, sp_state_j, sp_check_j, sp_score, sp_prices_j, sp_settings_j, sp_day_j -%}
 {%- from 'slotplanner_i18n.jinja' import t -%}
 
 {%- macro cur(x) -%}{{ (sp_cfg_j() | from_json).general.currency }}&nbsp;{{ '%.2f' | format(x | float(0)) | replace('.', ',' if (sp_cfg_j() | from_json).general.language == 'nl' else '.') }}{%- endmacro -%}
@@ -60,21 +60,22 @@
 {%- endmacro -%}
 
 {#- Price bars of a day with the quarters where a device ran. -#}
-{%- macro price_bars(t0, lijst) -%}
+{%- macro price_bars(t0, t1, lijst) -%}
 {%- set c = sp_cfg_j() | from_json -%}{%- set B = c.general.block_hours | int * 3600 -%}
-{%- set pr = (sp_prices_j() | from_json) | selectattr(0,'ge',t0) | selectattr(0,'lt',t0 + 86400) | list -%}
-{%- if pr | count >= 92 -%}
+{%- set pr = (sp_prices_j() | from_json) | selectattr(0,'ge',t0) | selectattr(0,'lt',t1) | list -%}
+{%- if pr | count >= ((t1 - t0) // 900) - 4 -%}
 {%- set v = pr | map(attribute=1) | list -%}{%- set mn = v | min -%}{%- set mx = v | max -%}{%- set sp = [mx - mn, 0.001] | max -%}
 <tr><td style="padding:18px 28px 0;">{{ head(t('r_prices')) }}</td></tr>
-<tr><td style="padding:0 16px 6px;"><table width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed;border-collapse:collapse;"><tr>{%- for q in pr -%}{%- set hit = namespace(v=false) -%}{%- for x in lijst if x.p.m is defined and x.p.m.min is defined -%}{%- set s0 = x.p.rs if (x.p.rs | int(0) > 0) else x.p.s -%}{%- if s0 | int <= q[0] and q[0] < s0 | int + 60 * (x.p.m.min | int(0)) -%}{%- set hit.v = true -%}{%- endif -%}{%- endfor -%}<td valign="bottom" style="padding:0;height:80px;background:{{ '#E0F2FE' if hit.v else '#F8FAFC' }};"><div style="height:{{ (5 + (q[1] - mn) / sp * 72) | round(0) | int }}px;background:{{ '#0EA5E9' if hit.v else '#CBD5E1' }};font-size:0;line-height:0;">&nbsp;</div></td>{%- endfor -%}</tr><tr>{%- for h in range(0, 24, 4) -%}<td colspan="16" style="font-size:11px;color:#6B7280;padding-top:4px;">{{ '%02d' | format(h) }}h</td>{%- endfor -%}</tr></table>
+<tr><td style="padding:0 16px 6px;"><table width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed;border-collapse:collapse;"><tr>{%- for q in pr -%}{%- set hit = namespace(v=false) -%}{%- for x in lijst if x.p.m is defined and x.p.m.min is defined -%}{%- set s0 = x.p.rs if (x.p.rs | int(0) > 0) else x.p.s -%}{%- if s0 | int <= q[0] and q[0] < s0 | int + 60 * (x.p.m.min | int(0)) -%}{%- set hit.v = true -%}{%- endif -%}{%- endfor -%}<td valign="bottom" style="padding:0;height:80px;background:{{ '#E0F2FE' if hit.v else '#F8FAFC' }};"><div style="height:{{ (5 + (q[1] - mn) / sp * 72) | round(0) | int }}px;background:{{ '#0EA5E9' if hit.v else '#CBD5E1' }};font-size:0;line-height:0;">&nbsp;</div></td>{%- endfor -%}</tr><tr>{%- for q in pr -%}{%- set lt = as_local(as_datetime(q[0])) -%}<td style="font-size:11px;color:#6B7280;padding-top:4px;white-space:nowrap;overflow:visible;">{{ ('%02d' | format(lt.hour) ~ 'h') if (lt.minute == 0 and lt.hour % 4 == 0) else '' }}</td>{%- endfor -%}</tr></table>
 <p style="margin:6px 12px 0;font-size:12px;color:#6B7280;">{{ t('r_prices_sum', nm(v | sum / v | count * 100, 1), nm(mn * 100, 1), nm(mx * 100, 1)) }}</p></td></tr>
 {%- endif -%}
 {%- endmacro -%}
 
 {#- A day: totals, prices, every run. -#}
-{%- macro day_body(t0, ks) -%}
+{%- macro day_body(day, ks) -%}
 {%- set c = sp_cfg_j() | from_json -%}
-{%- set lijst = runs_j(t0, t0 + 86400, ks) | from_json -%}
+{%- set dd = sp_day_j(day) | from_json -%}{%- set t0 = dd[0] -%}{%- set t1 = dd[1] -%}
+{%- set lijst = runs_j(t0, t1, ks) | from_json -%}
 {%- set ns = namespace(kwh=0, eur=0, bes=0, n=0, f=0, early=[]) -%}
 {%- for x in lijst -%}
 {%- set m = x.p.m | default({}) -%}{%- set ns.kwh = ns.kwh + m.kwh | default(0) -%}{%- set ns.eur = ns.eur + m.eur | default(0) -%}{%- set ns.bes = ns.bes + m.bes | default(0) -%}
@@ -83,14 +84,14 @@
 {%- endfor -%}
 <tr><td style="padding:22px 24px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>{{ tile(t('r_use'), nm(ns.kwh, 2) ~ ' kWh', t('r_runs', lijst | count)) }}{{ tile(t('r_cost'), cur(ns.eur), t('r_est_grid')) }}{{ tile(t('r_saved'), cur(ns.bes), t('r_vs_avg'), '#15803D' if ns.bes >= 0 else '#B91C1C') }}{{ tile(t('r_failed'), t('r_of', ns.f, ns.n), t('r_finished_blocks'), '#B91C1C' if ns.f else '#15803D') }}</tr></table></td></tr>
 {%- if ns.early -%}<tr><td style="padding:10px 24px 0;"><p style="margin:0;padding:10px 12px;border-radius:10px;background:#FFFBEB;border:1px solid #FDE68A;font-size:13px;color:#92400E;">&#9193; {{ t('r_early_box', ns.early | join(', ')) }}</p></td></tr>{%- endif -%}
-{{ price_bars(t0, lijst) }}
+{{ price_bars(t0, t1, lijst) }}
 <tr><td style="padding:18px 28px 0;">{{ head(t('r_all_runs', t0 | timestamp_custom('%d/%m/%Y'))) }}</td></tr>
 {%- for x in lijst -%}{{ run(x) }}{%- else -%}<tr><td style="padding:0 28px 8px;font-size:14px;color:#6B7280;">{{ t('r_no_runs') }}</td></tr>{%- endfor -%}
 {%- endmacro -%}
 
 {#- Diagnostics over the last N days. -#}
 {%- macro diag_body(days, ks) -%}
-{%- set t0 = as_timestamp(today_at('00:00')) | int - (days | int - 1) * 86400 -%}
+{%- set t0 = (sp_day_j((now() - timedelta(days=days | int - 1)).strftime('%Y-%m-%d')) | from_json)[0] -%}
 {%- set lijst = (runs_j(t0, as_timestamp(now()) | int + 2 * 86400, ks) | from_json) | reverse | list -%}
 {%- set bad = lijst | selectattr('res','in',['fail','fixed']) | list -%}
 <tr><td style="padding:22px 24px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>{{ tile(t('r_period_runs'), lijst | count, '') }}{{ tile(t('res_ok'), lijst | selectattr('res','eq','ok') | list | count, '', '#15803D') }}{{ tile(t('res_fixed'), lijst | selectattr('res','eq','fixed') | list | count, '', '#B45309') }}{{ tile(t('res_fail'), lijst | selectattr('res','eq','fail') | list | count, '', '#B91C1C') }}</tr></table></td></tr>
@@ -117,11 +118,16 @@
 {%- endmacro -%}
 
 {#- Week, month or year from the statistics. -#}
-{%- macro period_body(kind, key) -%}
+{%- macro period_body(kind, key, ks=[]) -%}
 {%- set c = sp_cfg_j() | from_json -%}
 {%- set data = state_attr('sensor.slotplanner_stats', kind) or {} -%}
 {%- set k = key if key and key in data else ((data.keys() | list | sort | last) if data else '') -%}
 {%- if k -%}{%- set a = data[k] -%}
+{%- if ks -%}{#- Only the chosen devices: totals from the per-device figures. -#}
+{%- set sel = namespace(kwh=0, eur=0, bes=0, n=0, dev={}) -%}
+{%- for d, b in (a.dev | default({})).items() if d in ks -%}{%- set sel.kwh = sel.kwh + b.kwh -%}{%- set sel.eur = sel.eur + b.eur -%}{%- set sel.bes = sel.bes + b.bes -%}{%- set sel.n = sel.n + b.n -%}{%- set sel.dev = dict(sel.dev, **{d: b}) -%}{%- endfor -%}
+{%- set a = {'kwh': sel.kwh, 'eur': sel.eur, 'bes': sel.bes, 'n': sel.n, 'dev': sel.dev} -%}
+{%- endif -%}
 <tr><td style="padding:22px 28px 0;">{{ head(k) }}</td></tr>
 <tr><td style="padding:0 24px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>{{ tile(t('r_use'), nm(a.kwh, 1) ~ ' kWh', t('r_runs', a.n)) }}{{ tile(t('r_cost'), cur(a.eur), t('r_est_grid')) }}{{ tile(t('r_saved'), cur(a.bes), t('r_vs_avg'), '#15803D' if a.bes >= 0 else '#B91C1C') }}{{ tile(t('r_without'), cur(a.eur + a.bes), t('r_at_avg')) }}</tr></table></td></tr>
 <tr><td style="padding:14px 28px 0;">{{ head(t('r_by_device')) }}</td></tr>
@@ -140,8 +146,8 @@
 
 {%- macro sp_report_subject(kind, day='', days=7, key='') -%}
 {%- if kind == 'night' -%}
-{%- set t0 = as_timestamp((day or (now() - timedelta(days=1)).strftime('%Y-%m-%d')) ~ 'T00:00:00') | int -%}
-{%- set l = runs_j(t0, t0 + 86400, []) | from_json -%}{%- set ns = namespace(b=0) -%}{%- for x in l -%}{%- set ns.b = ns.b + (x.p.m | default({})).bes | default(0) -%}{%- endfor -%}
+{%- set dd = sp_day_j(day or (now() - timedelta(days=1)).strftime('%Y-%m-%d')) | from_json -%}
+{%- set l = runs_j(dd[0], dd[1], []) | from_json -%}{%- set ns = namespace(b=0) -%}{%- for x in l -%}{%- set ns.b = ns.b + (x.p.m | default({})).bes | default(0) -%}{%- endfor -%}
 {{- t('mail_subject_night', sp_report_title(kind, day, days, key), cur(ns.b) | replace('&nbsp;', ' ')) -}}
 {%- else -%}{{- t('mail_subject', sp_report_title(kind, day, days, key)) -}}{%- endif -%}
 {%- endmacro -%}
@@ -150,15 +156,14 @@
 {%- macro sp_report(kind, day='', days=7, ks=[], key='') -%}
 {%- set today = now().strftime('%Y-%m-%d') -%}
 {%- set d = day if day else today -%}
-{%- set t0 = as_timestamp(d ~ 'T00:00:00') | int -%}
 {%- set sub = {'today': t('r_sub_day'), 'day': t('r_sub_day'), 'night': t('r_sub_day'), 'week': t('r_sub_period'), 'month': t('r_sub_period'), 'year': t('r_sub_period'), 'diagnostics': t('r_sub_diag'), 'plan': t('r_sub_plan'), 'all': t('r_sub_day')}.get(kind, '') -%}
 {%- set body -%}
-{%- if kind == 'today' -%}{{ day_body(as_timestamp(today ~ 'T00:00:00') | int, ks) }}
-{%- elif kind in ['day','night'] -%}{{ day_body(t0, ks) }}{%- if kind == 'night' -%}{{ plan_body(ks) }}{%- endif -%}
-{%- elif kind in ['week','month','year'] -%}{{ period_body(kind, key) }}
+{%- if kind == 'today' -%}{{ day_body(today, ks) }}
+{%- elif kind in ['day','night'] -%}{{ day_body(d, ks) }}{%- if kind == 'night' -%}{{ plan_body(ks) }}{%- endif -%}
+{%- elif kind in ['week','month','year'] -%}{{ period_body(kind, key, ks) }}
 {%- elif kind == 'diagnostics' -%}{{ diag_body(days, ks) }}
 {%- elif kind == 'plan' -%}{{ plan_body(ks) }}
-{%- elif kind == 'all' -%}{{ day_body(as_timestamp(today ~ 'T00:00:00') | int, ks) }}{{ plan_body(ks) }}{{ period_body('week', '') }}{{ diag_body(7, ks) }}
+{%- elif kind == 'all' -%}{{ day_body(today, ks) }}{{ plan_body(ks) }}{{ period_body('week', '', ks) }}{{ diag_body(7, ks) }}
 {%- endif -%}
 {%- endset -%}
 {{ wrap(sp_report_title(kind, day, days, key) | trim, sub, body) }}

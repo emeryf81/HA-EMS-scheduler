@@ -1,0 +1,238 @@
+{#- ==========================================================================
+  SLOTPLANNER CONFIGURATION
+  ==========================================================================
+  This is the only file you need to edit.
+
+  After every change:
+    Developer tools > Actions > "Template: reload custom templates"
+    (homeassistant.reload_custom_templates), then run the script
+    "Slotplanner: reload configuration" (script.slotplanner_reload).
+  The card shows any problem it finds in this file under "Setup check".
+
+  Syntax: this is a Jinja file. Text between {# and #} is a comment.
+  Strings use single quotes, booleans are true / false, lists use [ ],
+  dictionaries use { 'key': value }. Leave a field empty ('') when you do
+  not have it.
+  ========================================================================== -#}
+
+
+{#- ---------------------------------------------------------------- general
+  language        'en' or 'nl' (card, notifications and e-mails)
+  currency        symbol shown in the card and e-mails
+  block_hours     length of one cheap block, in hours (1 to 6)
+  blocks_per_day  how many cheap blocks the planner looks for (1 to 12)
+  fetch_time      when to look for new blocks (tomorrow's prices must be in)
+  autoplan_time   when devices with autoplan get their block
+  report_time     when the nightly e-mail goes out
+-#}
+{%- set general = {
+  'language': 'en',
+  'currency': '€',
+  'block_hours': 3,
+  'blocks_per_day': 6,
+  'fetch_time': '17:00',
+  'autoplan_time': '00:00',
+  'report_time': '00:05',
+} -%}
+
+
+{#- ----------------------------------------------------------------- prices
+  source     one of:
+             'frank'          Frank Energie (HACS). today + tomorrow sensors
+             'nordpool_hacs'  Nord Pool (HACS, custom-components/nordpool). one sensor
+             'entsoe'         ENTSO-e (HACS, JaccoR/hass-entso-e). one sensor
+             'nordpool'       Nord Pool (official integration). needs config_entry
+             'tibber'         Tibber (official integration). uses tibber.get_prices
+             'custom'         any sensor with a list of prices in an attribute
+  today      sensor with today's prices (frank, nordpool_hacs, entsoe, custom)
+  tomorrow   sensor with tomorrow's prices (frank, custom; leave '' if the
+             today sensor also holds tomorrow)
+  config_entry  Nord Pool official only: the config entry id
+  area          Nord Pool official only: price area, for example 'BE'
+  multiply / add   turn the source price into what you really pay per kWh,
+             including taxes and fees: price = source_price * multiply + add.
+             Frank and Tibber already give the full price: keep 1 and 0.
+  custom only:  attributes (list of attribute names holding the price list),
+                time_key, price_key, unit ('kwh' or 'mwh')
+-#}
+{%- set prices = {
+  'source': 'nordpool_hacs',
+  'today': 'sensor.nordpool_kwh_be_eur_3_10_06',
+  'tomorrow': '',
+  'config_entry': '',
+  'area': '',
+  'multiply': 1.0,
+  'add': 0.0,
+  'attributes': ['raw_today', 'raw_tomorrow'],
+  'time_key': 'start',
+  'price_key': 'value',
+  'unit': 'kwh',
+} -%}
+
+
+{#- --------------------------------------------------------- solar forecast
+  source      'forecast_solar' (official), 'solcast' (HACS) or 'none'
+  today       Forecast.Solar: sensor with today's expected production (kWh)
+              Solcast: sensor.solcast_pv_forecast_forecast_today
+  tomorrow    the same for tomorrow
+  feed_in_price   what you get for one kWh you send to the grid, in your
+              currency. A number, or an entity id that holds the number.
+  covers_kw   how much of a device the sun can cover. The planner counts the
+              expected sun up to this many kW at the feed-in price.
+  correction  optional entity ids with a factor for morning (before 11h),
+              midday (11h to 16h) and evening, if you correct your forecast.
+-#}
+{%- set solar = {
+  'source': 'forecast_solar',
+  'today': 'sensor.energy_production_today',
+  'tomorrow': 'sensor.energy_production_tomorrow',
+  'feed_in_price': 0.02,
+  'covers_kw': 2.0,
+  'correction': {'morning': '', 'midday': '', 'evening': ''},
+} -%}
+
+
+{#- ------------------------------------------------------------------- grid
+  power_sensor   live grid power in W, positive when you take from the grid,
+                 negative when you send to it. Used to split the cost of a
+                 device between grid and sun. Leave '' to count all of it
+                 as grid power.
+  pv_power_sensor  live solar power in W, only used in messages.
+  monthly_peak_sensor  (capacity tariff) highest quarter-hour peak of this
+                 month, in W or kW. Two devices may share a block only if
+                 they stay below it. Leave '' to ignore.
+  base_load_kw   what the house uses besides the planned devices.
+  max_devices_per_block  1 or 2.
+  pause_entity   optional on/off entity. While it is on, switch, climate and
+                 EV devices pause (for example a peak guard of your own).
+-#}
+{%- set grid = {
+  'power_sensor': '',
+  'pv_power_sensor': '',
+  'monthly_peak_sensor': '',
+  'base_load_kw': 0.7,
+  'max_devices_per_block': 2,
+  'pause_entity': '',
+} -%}
+
+
+{#- --------------------------------------------------------- notifications
+  people   who can get messages. id: short name without spaces.
+           notify: a notify action for the phone (notify.mobile_app_...).
+           email: address for the reports (needs the email service below).
+  email_service   a notify action that can send e-mail with HTML, for
+           example the SMTP integration (notify.my_mail). Leave '' for none.
+  remind_minutes  a planned device that is not ready gets a reminder this
+           many minutes before its block (0 = off).
+-#}
+{%- set people = [
+  {'id': 'alex', 'name': 'Alex', 'notify': 'notify.mobile_app_alex_phone', 'email': 'alex@example.com'},
+] -%}
+{%- set notifications = {
+  'email_service': '',
+  'remind_minutes': 45,
+} -%}
+
+
+{#- ---------------------------------------------------------------- devices
+  Every device has:
+    id          short name without spaces, never change it later
+    name        name in the card and in messages
+    icon        mdi icon
+    type        'appliance'  washing machine, dryer or dishwasher with
+                             remote start (Miele, or any brand with a status
+                             sensor and a start button)
+                'switch'     anything on a smart plug or relay
+                'climate'    air conditioning or heat pump (climate entities)
+                'ev'         electric car charger
+                'custom'     your own start and stop actions
+    power_kw    peak power in kW. The planner learns the real value after
+                two runs.
+    power_sensor  live power of this device in W (a smart plug, the charger).
+                Needed to measure kWh, cost and savings.
+    autoplan    'off'         only when you plan it yourself
+                'when_ready'  appliance: when it is loaded and set to start
+                              from Home Assistant
+                'daily'       every day one block
+                'ev'          as many blocks as the car needs (ev only)
+    autoplan_if optional on/off entity: autoplan only while it is on
+    max_blocks  how many blocks this device may have at the same time
+    start_actions / stop_actions   optional extra actions, run after the
+                built-in ones. Same format as in a script:
+                {'action': 'light.turn_on', 'target': {'entity_id': 'light.x'}}
+
+  Extra fields per type:
+    appliance  status, start_button, door, remote (remote control enabled),
+               running_states, ready_states
+               The defaults fit the Miele integration.
+    switch     switch (entity id), finish_below_w, finish_after_min:
+               stop the block early once power stays below finish_below_w
+               for finish_after_min minutes (0 = always run the full block)
+    climate    climates (list), hvac_mode, temperature (0 = leave as is)
+    ev         switch (charging on/off) or start_actions/stop_actions,
+               soc, target_soc (number or entity), battery_kwh, charge_kw,
+               cable (optional on/off entity: car connected)
+    custom     start_actions, stop_actions, ready_entity, running_entity
+-#}
+{%- set dishwasher = {
+  'id': 'dishwasher',
+  'name': 'Dishwasher',
+  'icon': 'mdi:dishwasher',
+  'type': 'appliance',
+  'power_kw': 2.0,
+  'power_sensor': 'sensor.dishwasher_plug_power',
+  'autoplan': 'when_ready',
+  'autoplan_if': '',
+  'max_blocks': 1,
+  'status': 'sensor.dishwasher_status',
+  'start_button': 'button.dishwasher_start',
+  'door': 'binary_sensor.dishwasher_door',
+  'remote': 'binary_sensor.dishwasher_remote_control',
+  'running_states': ['in_use', 'running'],
+  'ready_states': ['programmed', 'waiting_to_start'],
+} -%}
+
+{%- set pool_pump = {
+  'id': 'pool_pump',
+  'name': 'Pool pump',
+  'icon': 'mdi:pool',
+  'type': 'switch',
+  'power_kw': 0.4,
+  'power_sensor': 'sensor.pool_pump_power',
+  'autoplan': 'daily',
+  'autoplan_if': '',
+  'max_blocks': 2,
+  'switch': 'switch.pool_pump',
+  'finish_below_w': 0,
+  'finish_after_min': 0,
+} -%}
+
+{%- set car = {
+  'id': 'car',
+  'name': 'Car',
+  'icon': 'mdi:car-electric',
+  'type': 'ev',
+  'power_kw': 7.4,
+  'power_sensor': 'sensor.charger_power',
+  'autoplan': 'ev',
+  'autoplan_if': '',
+  'max_blocks': 3,
+  'switch': 'switch.charger_charging',
+  'soc': 'sensor.car_battery_level',
+  'target_soc': 80,
+  'battery_kwh': 60,
+  'charge_kw': 7.4,
+  'cable': 'binary_sensor.car_plugged_in',
+} -%}
+
+{#- List every device you want to use, in the order of the card. -#}
+{%- set devices = [dishwasher, pool_pump, car] -%}
+
+
+{#- ==========================================================================
+  Nothing to change below this line.
+  ========================================================================== -#}
+{%- macro slotplanner_config() -%}
+{{- {'general': general, 'prices': prices, 'solar': solar, 'grid': grid,
+     'people': people, 'notifications': notifications, 'devices': devices} | tojson -}}
+{%- endmacro -%}

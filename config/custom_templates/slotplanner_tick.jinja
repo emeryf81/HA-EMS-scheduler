@@ -1,0 +1,176 @@
+{#- Slotplanner executor logic, run every minute by automation.slotplanner_executor.
+    sp_tick_j() returns {"ops": [...], "calls": [...]}:
+      ops   changes for script.slotplanner_write
+      calls scripts to start afterwards: {"script": "...", "v": {...}} -#}
+{%- from 'slotplanner.jinja' import sp_cfg_j, sp_state_j, sp_settings_j, sp_check_j, sp_power, sp_ev_full, sp_offset, sp_duration, sp_grid_share, sp_price_at, sp_day_mean, sp_diagnose, sp_name -%}
+{%- from 'slotplanner_i18n.jinja' import t -%}
+
+{%- macro sp_tick_j() -%}
+{%- set c = sp_cfg_j() | from_json -%}
+{%- set S = sp_state_j() | from_json -%}
+{%- set set_ = sp_settings_j() | from_json -%}
+{%- set B = c.general.block_hours | int * 3600 -%}
+{%- set nu = as_timestamp(now()) | int -%}
+{%- set hm = now().strftime('%H:%M') -%}
+{%- set pause_on = c.grid.pause_entity and is_state(c.grid.pause_entity, 'on') -%}
+{%- set pv = states(c.grid.pv_power_sensor) | float(0) if c.grid.pv_power_sensor else 0 -%}
+{%- set R = namespace(ops=[], calls=[], active_w=0, meters=[]) -%}
+
+{%- for x in c.devices -%}
+{%- set d = x.id -%}
+{%- set mine = S.plans | selectattr('d','eq',d) | sort(attribute='s') | list -%}
+{%- set act = (mine | selectattr('st','eq','active') | list | first) | default(none) -%}
+{%- set nxt = (mine | selectattr('st','eq','planned') | list | first) | default(none) -%}
+{%- set k = sp_check_j(d) | from_json -%}
+{%- set nm = x.name -%}
+{%- set can_pause = x.type in ['switch','climate','ev'] -%}
+
+{#- ======================================================== active block -#}
+{%- if act -%}
+{%- set f = act.f | default({}) -%}
+{%- set st0 = act.rs if (act.rs | int(0) > 0 and act.rs | int < act.s | int) else act.s -%}
+{%- set end = st0 | int + B -%}
+{%- set W = sp_power(d) | float(0) -%}
+{%- set W = W if x.power_sensor else ((x.power_kw | float * 1000) if (k.running and x.type != 'appliance') else 0) -%}
+{%- set R.active_w = R.active_w + W -%}
+{%- set R.meters = R.meters + [[act.id, W]] -%}
+
+{#- finished? -#}
+{%- set fin = namespace(v=false, low=f.low | default(0) | int, idle=f.idle | default(0) | int, seen=f.seen | default(0) | int) -%}
+{%- if k.running -%}{%- set fin.seen = 1 -%}{%- endif -%}
+{%- if x.type == 'appliance' or (x.type == 'custom' and x.running_entity) -%}
+{%- set fin.idle = (fin.idle + 1) if (fin.seen and not k.running and states(x.status if x.type == 'appliance' else x.running_entity) not in ['unknown','unavailable']) else 0 -%}
+{%- set fin.v = fin.idle >= 2 -%}
+{%- elif x.type == 'switch' and x.finish_below_w | float(0) > 0 and x.power_sensor -%}
+{%- set fin.low = (fin.low + 1) if (fin.seen and W < x.finish_below_w | float(0)) else 0 -%}
+{%- set fin.v = fin.low >= [x.finish_after_min | int(0), 1] | max -%}
+{%- elif x.type == 'ev' -%}
+{%- set fin.v = sp_ev_full(d) | int == 1 and nu - (act.rs | int(nu)) >= 600 and W < 100 -%}
+{%- endif -%}
+{%- set f2 = dict(f, low=fin.low, idle=fin.idle, seen=fin.seen) -%}
+{%- set nextp = (mine | selectattr('st','eq','planned') | selectattr('s','eq',end) | list | first) | default(none) -%}
+
+{%- if x.type == 'appliance' and not f.seen | default(0) and not f.early | default(0) and k.running -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'f':f2}},{'op':'step','id':act.id,'w':t('step_started'),'r':'ok'}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_notify','v':{'kind':'step','device':d,'r':'ok','message':t('step_started')}}] -%}
+
+{%- elif x.type == 'appliance' and not fin.seen and nu - (act.rs | int(nu)) >= 360 -%}
+{%- set why = sp_diagnose(d) | trim -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'st':'failed','e':nu}},{'op':'step','id':act.id,'w':t('step_not_started', states(x.status)),'r':'fail','o':why}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_replan','v':{'device':d,'why':why}}] -%}
+
+{%- elif fin.v and not f.paused | default(0) -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'st':'done','f':f2,'e':nu}},
+  {'op':'step','id':act.id,'w':(t('step_ev_full', states(x.soc)) if x.type == 'ev' else t('step_finished')),'r':'ok'}] -%}
+{%- if x.type != 'appliance' -%}{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':d,'plan_id':act.id}}] -%}{%- endif -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_notify','v':{'kind':'step','device':d,'r':'ok','message':t('step_finished')}}] -%}
+
+{%- elif nu >= end and nextp and set_.enabled -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'st':'done','f':f2,'e':nu}},
+  {'op':'step','id':act.id,'w':t('step_continue'),'r':'ok'},
+  {'op':'set','id':nextp.id,'f':{'st':'active','rs':nextp.s,'owned':act.owned | default([]),'f':{'on':f.on | default(0),'seen':fin.seen,'paused':f.paused | default(0)}}},
+  {'op':'step','id':nextp.id,'w':t('step_continue'),'r':'ok'}] -%}
+
+{%- elif nu >= end and (not nextp or set_.enabled) and x.type == 'appliance' and k.running and nu < end + 7200 -%}
+{%- if not f.over | default(0) -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'f':dict(f2, over=1)}},{'op':'step','id':act.id,'w':t('step_overrun'),'r':'info'}] -%}
+{%- else -%}{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'f':f2}}] -%}{%- endif -%}
+
+{%- elif nu >= end -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'st':'done','f':f2,'e':nu}},{'op':'step','id':act.id,'w':t('step_end'),'r':'ok'}] -%}
+{%- if x.type != 'appliance' -%}{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':d,'plan_id':act.id}}] -%}{%- endif -%}
+
+{%- elif can_pause and pause_on and not f.paused | default(0) -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'f':dict(f2, paused=1)}},{'op':'step','id':act.id,'w':t('step_paused', c.grid.pause_entity),'r':'info'}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':d,'plan_id':act.id,'pause':true}}] -%}
+
+{%- elif can_pause and not pause_on and f.paused | default(0) -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'f':dict(f2, paused=0)}},{'op':'step','id':act.id,'w':t('step_resumed'),'r':'info'}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_start','v':{'device':d,'plan_id':act.id,'resume':true}}] -%}
+
+{%- elif can_pause and f.on | default(0) and not f.paused | default(0) and not k.running and nu - (act.rs | int(nu)) > 180 and (x.switch or x.type == 'climate') -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'st':'stopped','f':f2,'e':nu}},{'op':'step','id':act.id,'w':t('step_stopped'),'r':'fail','o':t('st_stopped')}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':d,'plan_id':act.id,'quiet':true}},
+  {'script':'slotplanner_notify','v':{'kind':'stopped','device':d,'r':'fail','title':t('n_stopped_title', nm),'message':t('n_stopped', nm, hm)}}] -%}
+
+{%- elif f2 != f -%}
+{%- set R.ops = R.ops + [{'op':'set','id':act.id,'f':{'f':f2}}] -%}
+{%- endif -%}
+
+{#- ========================================================= planned block -#}
+{%- elif nxt -%}
+{%- set s = nxt.s | int -%}{%- set end = s + B -%}
+{%- set f = nxt.f | default({}) -%}
+{%- set off = sp_offset(d, s) | int(0) if (nu >= s - 120 and nu < end) else 0 -%}
+{%- set blocked = (can_pause and pause_on) or not set_.enabled -%}
+
+{%- if nu >= end -%}
+{%- set why = sp_diagnose(d) | trim -%}
+{%- set R.ops = R.ops + [{'op':'set','id':nxt.id,'f':{'st':'failed','e':nu}},{'op':'step','id':nxt.id,'w':t('step_expired'),'r':'fail','o':why}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_replan','v':{'device':d,'why':why}}] -%}
+
+{%- elif x.type == 'appliance' and k.running and nu < s -%}
+{%- set rs = as_timestamp(states[x.status].last_changed) | int(nu) if states[x.status] is not none else nu -%}
+{%- set why = t('reason_hand') ~ (t('reason_sun', pv | round(0) | int) if pv > 300 else '') -%}
+{%- set R.ops = R.ops + [{'op':'set','id':nxt.id,'f':{'st':'active','rs':rs,'f':{'seen':1,'early':1}}},
+  {'op':'step','id':nxt.id,'w':t('step_early', rs | timestamp_custom('%H:%M'), s | timestamp_custom('%H:%M'), why),'r':'ok'}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_notify','v':{'kind':'early','device':d,'r':'ok','title':t('n_early_title', nm),'message':t('n_early', nm, rs | timestamp_custom('%H:%M'), s | timestamp_custom('%H:%M'), why)}}] -%}
+
+{%- elif k.running and nu >= s and (x.type == 'appliance' or (x.type == 'custom' and x.running_entity)) -%}
+{%- set R.ops = R.ops + [{'op':'set','id':nxt.id,'f':{'st':'active','rs':nu,'f':{'seen':1}}},{'op':'step','id':nxt.id,'w':t('step_self'),'r':'ok'}] -%}
+
+{%- elif nu >= s + off and k.ready and not blocked -%}
+{%- set R.ops = R.ops + [{'op':'set','id':nxt.id,'f':{'st':'active','rs':nu,'f':{}}},{'op':'step','id':nxt.id,'w':t('step_start'),'r':'info'}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_start','v':{'device':d,'plan_id':nxt.id}}] -%}
+
+{%- else -%}
+{%- if off > 0 and nu >= s and nu < s + 60 -%}
+{%- set R.ops = R.ops + [{'op':'step','id':nxt.id,'w':t('step_offset', (s + off) | timestamp_custom('%H:%M'), sp_duration(d)),'r':'info'}] -%}
+{%- endif -%}
+{%- if nu >= s + off and nu < s + off + 60 and not k.ready -%}
+{%- set R.ops = R.ops + [{'op':'step','id':nxt.id,'w':t('step_waiting'),'r':'fail','o':sp_diagnose(d) | trim}] -%}
+{%- endif -%}
+{%- set rm = c.notifications.remind_minutes | int(0) -%}
+{%- set h = now().hour -%}
+{%- set night = s > as_timestamp(today_at('23:00')) | int and s < as_timestamp(today_at('07:45') + timedelta(days=1)) | int -%}
+{%- if rm > 0 and not k.ready and not f.rem | default(0) and nu < s and ((nu >= s - rm * 60 and h >= 7 and h < 23) or (hm == '22:30' and night)) -%}
+{%- set R.ops = R.ops + [{'op':'set','id':nxt.id,'f':{'f':dict(f, rem=1)}}] -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_notify','v':{'kind':'remind','device':d,'r':'info','title':t('n_remind_title', nm),'message':t('n_remind', nm, k.reason, s | timestamp_custom('%H:%M'))}}] -%}
+{%- endif -%}
+{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+
+{#- ============================================================ measuring -#}
+{%- if R.meters -%}
+{%- set share = sp_grid_share(R.active_w) | float(1) -%}
+{%- set p = sp_price_at(nu) | float(0) -%}{%- set g = sp_day_mean(nu) | float(p) -%}
+{%- for m in R.meters if m[1] > 0 -%}
+{%- set q = m[1] / 60000 -%}{%- set qn = q * share -%}
+{%- set R.ops = R.ops + [{'op':'meter','id':m[0],'kwh':q | round(6),'net':qn | round(6),'eur':(qn * p) | round(6),'bes':(q * g - qn * p) | round(6),'w':m[1] | round(0)}] -%}
+{%- endfor -%}
+{%- endif -%}
+
+{#- ============================================================== tidy up -#}
+{%- for p in S.plans if p.st in ['done','failed','stopped'] -%}
+{%- set st0 = p.rs if (p.rs | int(0) > 0 and p.rs | int < p.s | int) else p.s -%}
+{%- if nu >= st0 | int + B or nu - (p.e | default(0) | int) > 3 * 3600 -%}
+{%- set R.ops = R.ops + [{'op':'del','id':p.id,'archive':true}] -%}
+{%- endif -%}
+{%- endfor -%}
+{#- Forget entities the planner switched on for devices that have no active block any more. -#}
+{%- set actd = S.plans | selectattr('st','eq','active') | map(attribute='d') | list -%}
+{%- set keep = namespace(v=[]) -%}
+{%- for x in c.devices if x.id in actd -%}{%- set keep.v = keep.v + ([x.switch] if x.switch is defined and x.switch else []) + (x.climates if x.climates is defined else []) -%}{%- endfor -%}
+{%- set stale = S.touched | reject('in', keep.v) | list -%}
+{%- if stale and not R.calls | selectattr('script','eq','slotplanner_start') | list and not R.calls | selectattr('script','eq','slotplanner_stop') | list -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':'','entities':stale}}] -%}
+{%- endif -%}
+{#- Plans of a device that is no longer in the configuration stay until their block is over. -#}
+{%- for p in S.plans if p.d not in (c.devices | map(attribute='id') | list) and nu >= p.s | int + B -%}
+{%- set R.calls = R.calls + [{'script':'slotplanner_stop','v':{'device':p.d,'plan_id':p.id}}] -%}
+{%- set R.ops = R.ops + [{'op':'del','id':p.id,'archive':false}] -%}
+{%- endfor -%}
+
+{{- {'ops': R.ops, 'calls': R.calls} | tojson -}}
+{%- endmacro -%}

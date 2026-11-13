@@ -1,0 +1,138 @@
+{#- ==========================================================================
+  EXAMPLE: a Belgian house with a dynamic Frank Energie contract, solar
+  panels with Forecast.Solar, three Miele appliances with remote start, an
+  electric car, three air conditioners and a pool with heat pump, filter and
+  salt system on smart plugs.
+
+  This is the setup the Slotplanner was built and tested on. Entity ids are
+  kept where they are generic, people and room names are replaced. Copy what
+  you need into config/custom_templates/slotplanner_config.jinja.
+  ========================================================================== -#}
+
+{%- set general = {
+  'language': 'nl',
+  'currency': '€',
+  'block_hours': 3,
+  'blocks_per_day': 6,
+  'fetch_time': '17:00',
+  'autoplan_time': '00:00',
+  'report_time': '00:05',
+} -%}
+
+{#- Frank Energie (HACS) gives the full price per kWh, taxes included. -#}
+{%- set prices = {
+  'source': 'frank',
+  'today': 'sensor.frank_prices_today',
+  'tomorrow': 'sensor.frank_prices_tomorrow',
+  'multiply': 1.0,
+  'add': 0.0,
+} -%}
+
+{#- Forecast.Solar with a learned correction per part of the day (three input_numbers
+    that another automation keeps up to date). The feed-in price lives in a helper. -#}
+{%- set solar = {
+  'source': 'forecast_solar',
+  'today': 'sensor.energy_production_today_4',
+  'tomorrow': 'sensor.energy_production_tomorrow_4',
+  'feed_in_price': 'input_number.ef_injectie_prijs',
+  'covers_kw': 2.0,
+  'correction': {
+    'morning': 'input_number.ef_h13_correctiefactor_ochtend_06_11u',
+    'midday': 'input_number.ef_h13_correctiefactor_midden_11_16u',
+    'evening': 'input_number.ef_h13_correctiefactor_avond_16_21u',
+  },
+} -%}
+
+{#- P1 meter (HomeWizard) for the grid power and the monthly peak (capacity tariff).
+    pause_entity is the house's own peak guard: while it is on, the pool and the car pause. -#}
+{%- set grid = {
+  'power_sensor': 'sensor.p1_meter_vermogen',
+  'pv_power_sensor': 'sensor.ef_pv_vermogen',
+  'monthly_peak_sensor': 'sensor.p1_meter_p1_meter_maandelijks_piekvermogen',
+  'base_load_kw': 0.7,
+  'max_devices_per_block': 2,
+  'pause_entity': 'input_boolean.piek_noodstop_actief_7min',
+} -%}
+
+{#- Two people. Replace the notify actions and addresses with your own. -#}
+{%- set people = [
+  {'id': 'persoon1', 'name': 'Persoon 1', 'notify': 'notify.mobile_app_telefoon_1', 'email': 'persoon1@example.com'},
+  {'id': 'persoon2', 'name': 'Persoon 2', 'notify': 'notify.mobile_app_telefoon_2', 'email': 'persoon2@example.com'},
+] -%}
+{%- set notifications = {
+  'email_service': 'notify.ef_email',
+  'remind_minutes': 45,
+} -%}
+
+{#- Electric car (36 kWh battery) on an Alfen charger. Charging is switched by an input_boolean
+    that the house's own charge control reads; use your charger's switch instead if it has one. -#}
+{%- set auto = {
+  'id': 'auto', 'name': 'Auto', 'icon': 'mdi:car-electric', 'type': 'ev',
+  'power_kw': 6.9, 'power_sensor': 'sensor.alfen_active_power_total_socket_1',
+  'autoplan': 'ev', 'max_blocks': 3,
+  'switch': '',
+  'start_actions': [{'action': 'input_boolean.turn_on', 'target': {'entity_id': 'input_boolean.ev_laden_toegestaan'}}],
+  'stop_actions': [{'action': 'input_boolean.turn_off', 'target': {'entity_id': 'input_boolean.ev_laden_toegestaan'}}],
+  'soc': 'sensor.e_golf_state_of_charge', 'target_soc': 'input_number.ef_egolf_target_soc',
+  'battery_kwh': 36, 'charge_kw': 6.9, 'cable': 'binary_sensor.ef_ev_kabel_verbonden',
+} -%}
+
+{#- Miele washing machine, dryer and dishwasher (official Miele integration). They are planned
+    automatically as soon as they are loaded, the door is closed and remote start is on. -#}
+{%- set wasmachine = {
+  'id': 'wasmachine', 'name': 'Wasmachine', 'icon': 'mdi:washing-machine', 'type': 'appliance',
+  'power_kw': 2.2, 'power_sensor': 'sensor.wasmachine_vermogen', 'autoplan': 'when_ready',
+  'status': 'sensor.wasautomaat_status', 'start_button': 'button.wasautomaat_start',
+  'door': 'binary_sensor.wasautomaat_deur', 'remote': 'binary_sensor.wasautomaat_afstandsbediening',
+} -%}
+{%- set droogkast = {
+  'id': 'droogkast', 'name': 'Droogkast', 'icon': 'mdi:tumble-dryer', 'type': 'appliance',
+  'power_kw': 1.0, 'power_sensor': 'sensor.droogkast_vermogen', 'autoplan': 'when_ready',
+  'status': 'sensor.tumble_dryer_status', 'start_button': 'button.tumble_dryer_start',
+  'door': 'binary_sensor.tumble_dryer_deur', 'remote': 'binary_sensor.tumble_dryer_afstandsbediening',
+} -%}
+{%- set vaatwasser = {
+  'id': 'vaatwasser', 'name': 'Vaatwasser', 'icon': 'mdi:dishwasher', 'type': 'appliance',
+  'power_kw': 2.2, 'power_sensor': 'sensor.smart_switch_24040886571791510803c4e7ae024b51_power', 'autoplan': 'when_ready',
+  'status': 'sensor.dishwasher_status_2', 'start_button': 'button.dishwasher_start',
+  'door': 'binary_sensor.dishwasher_deur', 'remote': 'binary_sensor.dishwasher_afstandsbediening',
+} -%}
+
+{#- Three air conditioners heating the bedrooms on cheap or sunny hours. Only planned
+    automatically while the helper "airco plannen" is on. -#}
+{%- set airco = {
+  'id': 'airco', 'name': "Airco's", 'icon': 'mdi:air-conditioner', 'type': 'climate',
+  'power_kw': 1.5, 'power_sensor': 'sensor.ef_airco_totaal_vermogen_geclampt',
+  'autoplan': 'daily', 'autoplan_if': 'input_boolean.airco_plannen',
+  'climates': ['climate.grote_slaapkamer', 'climate.slaapkamer_2', 'climate.slaapkamer_3'],
+  'hvac_mode': 'heat', 'temperature': 0,
+} -%}
+
+{#- Pool: heat pump plus filter and salt on three smart plugs. The heat pump block also runs
+    the filter and the salt system (extra start and stop actions). -#}
+{%- set zwembad_wp = {
+  'id': 'zwembad_wp', 'name': 'WP + filter + zout', 'icon': 'mdi:heat-pump', 'type': 'switch',
+  'power_kw': 1.8, 'power_sensor': 'sensor.smart_switch_24040886497541510803c4e7ae025089_power',
+  'autoplan': 'daily', 'autoplan_if': 'input_boolean.zwemseizoen', 'max_blocks': 2,
+  'switch': 'switch.smart_switch_24040886497541510803c4e7ae025089_outlet',
+  'start_actions': [{'action': 'switch.turn_on', 'target': {'entity_id': ['switch.smart_switch_24040896585853510803c4e7ae024687_outlet', 'switch.smart_switch_24040871353368510803c4e7ae0246a7_outlet']}}],
+  'stop_actions': [{'action': 'switch.turn_off', 'target': {'entity_id': ['switch.smart_switch_24040896585853510803c4e7ae024687_outlet', 'switch.smart_switch_24040871353368510803c4e7ae0246a7_outlet']}}],
+} -%}
+{%- set filter_zout = {
+  'id': 'filter_zout', 'name': 'Filter + zout', 'icon': 'mdi:pool', 'type': 'switch',
+  'power_kw': 0.4, 'power_sensor': 'sensor.smart_switch_24040896585853510803c4e7ae024687_power',
+  'autoplan': 'daily', 'max_blocks': 2,
+  'switch': 'switch.smart_switch_24040896585853510803c4e7ae024687_outlet',
+  'start_actions': [{'action': 'switch.turn_on', 'target': {'entity_id': 'switch.smart_switch_24040871353368510803c4e7ae0246a7_outlet'}}],
+  'stop_actions': [{'action': 'switch.turn_off', 'target': {'entity_id': 'switch.smart_switch_24040871353368510803c4e7ae0246a7_outlet'}}],
+} -%}
+
+{%- set devices = [auto, wasmachine, droogkast, vaatwasser, airco, zwembad_wp, filter_zout] -%}
+
+{#- ==========================================================================
+  Nothing to change below this line.
+  ========================================================================== -#}
+{%- macro slotplanner_config() -%}
+{{- {'general': general, 'prices': prices, 'solar': solar, 'grid': grid,
+     'people': people, 'notifications': notifications, 'devices': devices} | tojson -}}
+{%- endmacro -%}

@@ -1,0 +1,10 @@
+# A dashboard view for the Slotplanner. Settings > Dashboards > (your dashboard) > Edit > Raw configuration editor,
+# and add this under views:. Add the resource /local/slotplanner/slotplanner-card.js (JavaScript module) first.
+- title: Slotplanner
+  path: slotplanner
+  icon: mdi:calendar-clock
+  type: panel
+  cards:
+    - type: custom:slotplanner-card
+      # title: My planner      # optional
+      # tab: plan              # optional: plan, runs, reports or setup

@@ -1,0 +1,18 @@
+# Test Home Assistant runtime files
+tests/ha/.storage/
+tests/ha/.cloud/
+tests/ha/.HA_VERSION
+tests/ha/home-assistant*.db*
+tests/ha/home-assistant.log*
+tests/ha/deps/
+tests/ha/tts/
+tests/ha/blueprints/
+tests/ha/secrets.yaml
+tests/ha/packages/slotplanner.yaml
+tests/ha/custom_templates/
+tests/ha/www/
+tests/*.png
+.venv/
+node_modules/
+__pycache__/
+tests/ha/.ha_run.lock

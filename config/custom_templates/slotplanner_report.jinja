@@ -1,0 +1,170 @@
+{#- Slotplanner e-mail reports (HTML). Used by script.slotplanner_mail and the preview in the card.
+    Kinds: today, day, night, week, month, year, diagnostics, plan, all. -#}
+{%- from 'slotplanner.jinja' import sp_cfg_j, sp_state_j, sp_check_j, sp_score, sp_prices_j, sp_settings_j, sp_day_j -%}
+{%- from 'slotplanner_i18n.jinja' import t -%}
+
+{%- macro cur(x) -%}{{ (sp_cfg_j() | from_json).general.currency }}&nbsp;{{ '%.2f' | format(x | float(0)) | replace('.', ',' if (sp_cfg_j() | from_json).general.language == 'nl' else '.') }}{%- endmacro -%}
+{%- macro nm(x, d=1) -%}{{ ('%.' ~ d ~ 'f') | format(x | float(0)) | replace('.', ',' if (sp_cfg_j() | from_json).general.language == 'nl' else '.') }}{%- endmacro -%}
+{%- macro head(txt) -%}<p style="margin:0 0 12px;font-size:11px;color:#6B7280;letter-spacing:2px;text-transform:uppercase;font-weight:700;">{{ txt }}</p>{%- endmacro -%}
+{%- macro tile(l, v, s, col='#111827') -%}<td width="25%" valign="top" style="padding:0 4px;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;"><tr><td style="padding:12px;"><p style="margin:0;font-size:10px;letter-spacing:1px;color:#6B7280;text-transform:uppercase;font-weight:700;">{{ l }}</p><p style="margin:4px 0 0;font-size:20px;font-weight:800;color:{{ col }};white-space:nowrap;">{{ v }}</p><p style="margin:2px 0 0;font-size:11px;color:#6B7280;">{{ s }}</p></td></tr></table></td>{%- endmacro -%}
+{%- macro wrap(title, sub, body) -%}<html><body style="margin:0;padding:0;background:#f4f4f5;font-family:Arial,Helvetica,sans-serif;color:#111827;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:20px 0;"><tr><td align="center"><table cellpadding="0" cellspacing="0" style="width:100%;max-width:640px;background:#ffffff;border-radius:12px;overflow:hidden;"><tr><td style="background:#1B2A4A;padding:26px 28px;"><p style="margin:0;color:#D4AB4E;font-size:11px;letter-spacing:3px;text-transform:uppercase;font-weight:700;">Slotplanner</p><h1 style="margin:8px 0 0;color:#ffffff;font-size:24px;line-height:30px;">{{ title }}</h1><p style="margin:6px 0 0;color:#CBD5E1;font-size:14px;">{{ sub }}</p></td></tr>{{ body }}<tr><td style="background:#F9FAFB;border-top:1px solid #E5E7EB;padding:12px 28px;"><p style="margin:0;font-size:11px;color:#9CA3AF;text-align:center;">{{ t('r_footer', now().strftime('%d/%m/%Y %H:%M')) }}</p></td></tr></table></td></tr></table></body></html>{%- endmacro -%}
+
+{#- Result of a run: ok, fixed, fail, busy, planned, none -#}
+{%- macro res(p) -%}
+{%- if p.st == 'active' -%}busy{%- elif p.st == 'planned' -%}{{ 'planned' if p.s | int > as_timestamp(now()) else 'none' }}
+{%- elif p.st in ['failed','stopped'] -%}fail
+{%- elif p.st == 'done' -%}{{ 'fixed' if (p.steps | default([]) | selectattr('r','eq','fail') | list | count > 0) else 'ok' }}
+{%- else -%}none{%- endif -%}
+{%- endmacro -%}
+
+{#- Runs (live plans and history) that start between t0 and t1, for the chosen devices. JSON list of {p, res}. -#}
+{%- macro runs_j(t0, t1, ks) -%}
+{%- set live = (sp_state_j() | from_json).plans -%}
+{%- set hist = state_attr('sensor.slotplanner_history','runs') or [] -%}
+{%- set ns = namespace(v=[], ids=[]) -%}
+{%- for p in (live + hist) | sort(attribute='s') if p.s | int >= t0 and p.s | int < t1 and (not ks or p.d in ks) and p.id not in ns.ids -%}
+{%- set ns.ids = ns.ids + [p.id] -%}{%- set ns.v = ns.v + [{'p': p, 'res': res(p) | trim}] -%}
+{%- endfor -%}
+{{- ns.v | tojson -}}
+{%- endmacro -%}
+
+{%- macro badge(r) -%}{%- set b = {'ok':['#DCFCE7','#166534','res_ok'],'fixed':['#FEF3C7','#92400E','res_fixed'],'fail':['#FEE2E2','#991B1B','res_fail'],'busy':['#DBEAFE','#1E40AF','res_busy'],'planned':['#F3F4F6','#374151','res_planned'],'none':['#F3F4F6','#6B7280','res_none']}.get(r, ['#F3F4F6','#374151','res_none']) -%}<span style="display:inline-block;padding:2px 9px;border-radius:999px;background:{{ b[0] }};color:{{ b[1] }};font-size:11px;font-weight:700;">{{ t(b[2]) }}</span>{%- endmacro -%}
+
+{#- One run: header, measurement, steps and conclusion. -#}
+{%- macro run(x) -%}
+{%- set c = sp_cfg_j() | from_json -%}{%- set B = c.general.block_hours | int * 3600 -%}
+{%- set p = x.p -%}{%- set m = p.m | default({}) -%}
+{%- set dv = (c.devices | selectattr('id','eq',p.d) | list | first) | default({'name': p.d}) -%}
+{%- set col = {'ok':'#22C55E','fixed':'#F59E0B','fail':'#EF4444','busy':'#3B82F6'}.get(x.res,'#CBD5E1') -%}
+{%- set s0 = p.rs if (p.rs | int(0) > 0 and p.rs | int < p.s | int) else p.s -%}
+<tr><td style="padding:8px 24px;"><table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-left:4px solid {{ col }};border-radius:10px;"><tr><td style="padding:12px 14px;">
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td style="font-size:15px;font-weight:700;color:#111827;">{{ dv.name }} <span style="font-weight:400;color:#6B7280;font-size:13px;">{{ (s0 | int) | timestamp_custom('%d/%m %H:%M') }} → {{ (s0 | int + B) | timestamp_custom('%H:%M') }}</span></td><td align="right">{{ badge(x.res) }}</td></tr></table>
+{%- if (p.f | default({})).early | default(0) -%}<p style="margin:8px 0 0;padding:6px 10px;border-radius:8px;background:#FFFBEB;border:1px solid #FDE68A;font-size:12px;color:#92400E;"><b>&#9193; {{ t('r_early_note') }}</b></p>{%- endif -%}
+{%- if m.kwh is defined -%}
+{%- set kwh = m.kwh | float(0) -%}{%- set net = m.net | float(0) -%}{%- set eur = m.eur | float(0) -%}{%- set bes = m.bes | float(0) -%}{%- set mn = m.min | int(0) -%}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;background:#F9FAFB;border-radius:8px;"><tr>
+<td style="padding:8px 10px;font-size:12px;color:#6B7280;">{{ t('r_use') }}<br><b style="font-size:15px;color:#111827;">{{ nm(kwh, 2) }} kWh</b><br>{{ t('r_avg_kw', nm(kwh / (mn / 60), 2)) if mn > 0 else '' }}</td>
+<td style="padding:8px 10px;font-size:12px;color:#6B7280;">{{ t('r_grid') }}<br><b style="font-size:15px;color:#111827;">{{ nm(net, 2) }} kWh</b><br>{{ ((net / kwh * 100) | round(0) | int ~ ' %') if kwh > 0.005 else '' }}</td>
+<td style="padding:8px 10px;font-size:12px;color:#6B7280;">{{ t('r_cost') }}<br><b style="font-size:15px;color:#111827;">{{ cur(eur) }}</b><br>{{ (nm(eur / net * 100, 1) ~ ' ct/kWh') if net > 0.01 else t('r_nothing_grid') }}</td>
+<td style="padding:8px 10px;font-size:12px;color:#6B7280;">{{ t('r_without') }}<br><b style="font-size:15px;color:#111827;">{{ cur(eur + bes) }}</b><br>{{ t('r_at_avg') }}</td>
+<td style="padding:8px 10px;font-size:12px;color:#6B7280;">{{ t('r_saved') }}<br><b style="font-size:15px;color:{{ '#15803D' if bes >= 0 else '#B91C1C' }};">{{ cur(bes) }}</b><br>{{ t('r_measured', mn) }}{{ (' · ' ~ t('r_peak', nm(m.pk | float(0) / 1000, 2))) if m.pk | float(0) > 0 else '' }}</td>
+</tr></table>
+{%- endif -%}
+{%- if p.steps | default([]) -%}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">{%- for z in p.steps -%}<tr><td valign="top" style="width:82px;padding:3px 0;font-size:12px;color:#6B7280;white-space:nowrap;">{{ (z.t | int) | timestamp_custom('%d/%m %H:%M') }}</td><td valign="top" style="width:14px;padding:3px 0;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{{ {'ok':'#22C55E','fail':'#EF4444'}.get(z.r,'#94A3B8') }};"></span></td><td style="padding:3px 0;font-size:13px;color:#1F2937;">{{ z.w }}{% if z.o %}<br><span style="color:#92400E;font-size:12px;">{{ t('r_cause', z.o) }}</span>{% endif %}</td></tr>{%- endfor -%}</table>
+{%- endif -%}
+{%- if x.res in ['fail','fixed'] -%}{%- set f = (p.steps | default([]) | selectattr('r','eq','fail') | list | last) | default({'w':'','o':''}) -%}
+<p style="margin:10px 0 0;padding:8px 10px;border-radius:8px;background:{{ '#FEF2F2' if x.res == 'fail' else '#FFFBEB' }};font-size:13px;color:#1F2937;"><b>{{ t('r_conclusion') }}:</b> {{ t('r_fixed') if x.res == 'fixed' else '' }}{{ (t('r_cause', f.o) if f.o else f.w) }}</p>
+{%- endif -%}
+</td></tr></table></td></tr>
+{%- endmacro -%}
+
+{#- Price bars of a day with the quarters where a device ran. -#}
+{%- macro price_bars(t0, t1, lijst) -%}
+{%- set c = sp_cfg_j() | from_json -%}{%- set B = c.general.block_hours | int * 3600 -%}
+{%- set pr = (sp_prices_j() | from_json) | selectattr(0,'ge',t0) | selectattr(0,'lt',t1) | list -%}
+{%- if pr | count >= ((t1 - t0) // 900) - 4 -%}
+{%- set v = pr | map(attribute=1) | list -%}{%- set mn = v | min -%}{%- set mx = v | max -%}{%- set sp = [mx - mn, 0.001] | max -%}
+<tr><td style="padding:18px 28px 0;">{{ head(t('r_prices')) }}</td></tr>
+<tr><td style="padding:0 16px 6px;"><table width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed;border-collapse:collapse;"><tr>{%- for q in pr -%}{%- set hit = namespace(v=false) -%}{%- for x in lijst if x.p.m is defined and x.p.m.min is defined -%}{%- set s0 = x.p.rs if (x.p.rs | int(0) > 0) else x.p.s -%}{%- if s0 | int <= q[0] and q[0] < s0 | int + 60 * (x.p.m.min | int(0)) -%}{%- set hit.v = true -%}{%- endif -%}{%- endfor -%}<td valign="bottom" style="padding:0;height:80px;background:{{ '#E0F2FE' if hit.v else '#F8FAFC' }};"><div style="height:{{ (5 + (q[1] - mn) / sp * 72) | round(0) | int }}px;background:{{ '#0EA5E9' if hit.v else '#CBD5E1' }};font-size:0;line-height:0;">&nbsp;</div></td>{%- endfor -%}</tr><tr>{%- for q in pr -%}{%- set lt = as_local(as_datetime(q[0])) -%}<td style="font-size:11px;color:#6B7280;padding-top:4px;white-space:nowrap;overflow:visible;">{{ ('%02d' | format(lt.hour) ~ 'h') if (lt.minute == 0 and lt.hour % 4 == 0) else '' }}</td>{%- endfor -%}</tr></table>
+<p style="margin:6px 12px 0;font-size:12px;color:#6B7280;">{{ t('r_prices_sum', nm(v | sum / v | count * 100, 1), nm(mn * 100, 1), nm(mx * 100, 1)) }}</p></td></tr>
+{%- endif -%}
+{%- endmacro -%}
+
+{#- A day: totals, prices, every run. -#}
+{%- macro day_body(day, ks) -%}
+{%- set c = sp_cfg_j() | from_json -%}
+{%- set dd = sp_day_j(day) | from_json -%}{%- set t0 = dd[0] -%}{%- set t1 = dd[1] -%}
+{%- set lijst = runs_j(t0, t1, ks) | from_json -%}
+{%- set ns = namespace(kwh=0, eur=0, bes=0, n=0, f=0, early=[]) -%}
+{%- for x in lijst -%}
+{%- set m = x.p.m | default({}) -%}{%- set ns.kwh = ns.kwh + m.kwh | default(0) -%}{%- set ns.eur = ns.eur + m.eur | default(0) -%}{%- set ns.bes = ns.bes + m.bes | default(0) -%}
+{%- if x.res in ['ok','fixed','fail'] -%}{%- set ns.n = ns.n + 1 -%}{%- endif -%}{%- if x.res == 'fail' -%}{%- set ns.f = ns.f + 1 -%}{%- endif -%}
+{%- if (x.p.f | default({})).early | default(0) -%}{%- set dv = (c.devices | selectattr('id','eq',x.p.d) | list | first) | default({'name': x.p.d}) -%}{%- set ns.early = ns.early + [dv.name ~ ' ' ~ ((x.p.rs | int) | timestamp_custom('%H:%M'))] -%}{%- endif -%}
+{%- endfor -%}
+<tr><td style="padding:22px 24px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>{{ tile(t('r_use'), nm(ns.kwh, 2) ~ ' kWh', t('r_runs', lijst | count)) }}{{ tile(t('r_cost'), cur(ns.eur), t('r_est_grid')) }}{{ tile(t('r_saved'), cur(ns.bes), t('r_vs_avg'), '#15803D' if ns.bes >= 0 else '#B91C1C') }}{{ tile(t('r_failed'), t('r_of', ns.f, ns.n), t('r_finished_blocks'), '#B91C1C' if ns.f else '#15803D') }}</tr></table></td></tr>
+{%- if ns.early -%}<tr><td style="padding:10px 24px 0;"><p style="margin:0;padding:10px 12px;border-radius:10px;background:#FFFBEB;border:1px solid #FDE68A;font-size:13px;color:#92400E;">&#9193; {{ t('r_early_box', ns.early | join(', ')) }}</p></td></tr>{%- endif -%}
+{{ price_bars(t0, t1, lijst) }}
+<tr><td style="padding:18px 28px 0;">{{ head(t('r_all_runs', t0 | timestamp_custom('%d/%m/%Y'))) }}</td></tr>
+{%- for x in lijst -%}{{ run(x) }}{%- else -%}<tr><td style="padding:0 28px 8px;font-size:14px;color:#6B7280;">{{ t('r_no_runs') }}</td></tr>{%- endfor -%}
+{%- endmacro -%}
+
+{#- Diagnostics over the last N days. -#}
+{%- macro diag_body(days, ks) -%}
+{%- set t0 = (sp_day_j((now() - timedelta(days=days | int - 1)).strftime('%Y-%m-%d')) | from_json)[0] -%}
+{%- set lijst = (runs_j(t0, as_timestamp(now()) | int + 2 * 86400, ks) | from_json) | reverse | list -%}
+{%- set bad = lijst | selectattr('res','in',['fail','fixed']) | list -%}
+<tr><td style="padding:22px 24px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>{{ tile(t('r_period_runs'), lijst | count, '') }}{{ tile(t('res_ok'), lijst | selectattr('res','eq','ok') | list | count, '', '#15803D') }}{{ tile(t('res_fixed'), lijst | selectattr('res','eq','fixed') | list | count, '', '#B45309') }}{{ tile(t('res_fail'), lijst | selectattr('res','eq','fail') | list | count, '', '#B91C1C') }}</tr></table></td></tr>
+{%- if bad -%}<tr><td style="padding:18px 28px 0;">{{ head(t('r_where_wrong')) }}</td></tr>{%- for x in bad -%}{{ run(x) }}{%- endfor -%}{%- endif -%}
+<tr><td style="padding:18px 28px 0;">{{ head(t('r_all_newest')) }}</td></tr>
+{%- for x in lijst if x.res not in ['fail','fixed'] -%}{{ run(x) }}{%- endfor -%}
+{%- endmacro -%}
+
+{#- Coming blocks, score and readiness. -#}
+{%- macro plan_body(ks) -%}
+{%- set c = sp_cfg_j() | from_json -%}{%- set nu = as_timestamp(now()) | int -%}
+{%- set plans = (sp_state_j() | from_json).plans | selectattr('st','in',['planned','active']) | list -%}
+<tr><td style="padding:22px 28px 0;">{{ head(t('r_blocks')) }}</td></tr>
+<tr><td style="padding:0 24px 8px;"><table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-collapse:collapse;"><tr style="background:#F9FAFB;">{%- for h in ['r_block','r_price','r_sun','r_score','r_devices'] -%}<td style="padding:8px 10px;font-size:10px;font-weight:700;color:#6B7280;text-transform:uppercase;">{{ t(h) }}</td>{%- endfor -%}</tr>
+{%- for sl in (state_attr('sensor.slotplanner_slots','slots') or []) | sort(attribute='s') if sl.e > nu -%}{%- set sc = sp_score(sl.s) | trim -%}{%- set inn = plans | selectattr('s','eq',sl.s) | list -%}
+<tr style="border-top:1px solid #E5E7EB;"><td style="padding:9px 10px;font-size:13px;font-weight:700;white-space:nowrap;">{{ sl.s | timestamp_custom('%a %d/%m %H:%M') }}</td><td style="padding:9px 10px;font-size:13px;">{{ nm(sl.p, 1) }} ct</td><td style="padding:9px 10px;font-size:13px;">{{ nm(sl.z * c.general.block_hours, 1) }} kWh</td><td style="padding:9px 10px;font-size:13px;">{% if sc %}<span style="display:inline-block;padding:1px 8px;border-radius:999px;font-weight:800;background:{{ '#DCFCE7' if sc | int >= 70 else ('#FEF3C7' if sc | int >= 40 else '#FEE2E2') }};color:{{ '#166534' if sc | int >= 70 else ('#92400E' if sc | int >= 40 else '#991B1B') }};">{{ sc }}</span>{% endif %}</td><td style="padding:9px 10px;font-size:13px;">{% for b in inn %}{{ ((c.devices | selectattr('id','eq',b.d) | list | first) | default({'name': b.d})).name }}{{ '<br>' if not loop.last }}{% else %}<span style="color:#9CA3AF;">{{ t('r_free') }}</span>{% endfor %}</td></tr>
+{%- endfor -%}</table>
+<p style="margin:8px 4px 0;font-size:12px;color:#6B7280;">{{ t('r_score_note') }}</p></td></tr>
+<tr><td style="padding:14px 28px 0;">{{ head(t('r_ready')) }}</td></tr>
+<tr><td style="padding:0 24px 8px;"><table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-collapse:collapse;">
+{%- for x in c.devices if not ks or x.id in ks -%}{%- set k = sp_check_j(x.id) | from_json -%}{%- set mine = plans | selectattr('d','eq',x.id) | list -%}
+<tr style="border-top:1px solid #E5E7EB;"><td style="padding:8px 10px;font-size:13px;white-space:nowrap;">{{ x.name }}</td><td style="padding:8px 10px;font-size:13px;color:#374151;">{% for p in mine %}{{ t('st_' ~ p.st) }} · {{ (p.s | int) | timestamp_custom('%d/%m %H:%M') }}{{ '<br>' if not loop.last }}{% else %}{{ t('st_idle') }}{% endfor %}</td><td style="padding:8px 10px;font-size:13px;">{{ ('&#9989; ' ~ t('r_is_ready')) if k.ready else ('&#9203; ' ~ t('r_not_ready') ~ (': ' ~ k.reason if k.reason else '')) }}</td></tr>
+{%- endfor -%}</table></td></tr>
+{%- endmacro -%}
+
+{#- Week, month or year from the statistics. -#}
+{%- macro period_body(kind, key, ks=[]) -%}
+{%- set c = sp_cfg_j() | from_json -%}
+{%- set data = state_attr('sensor.slotplanner_stats', kind) or {} -%}
+{%- set k = key if key and key in data else ((data.keys() | list | sort | last) if data else '') -%}
+{%- if k -%}{%- set a = data[k] -%}
+{%- if ks -%}{#- Only the chosen devices: totals from the per-device figures. -#}
+{%- set sel = namespace(kwh=0, eur=0, bes=0, n=0, dev={}) -%}
+{%- for d, b in (a.dev | default({})).items() if d in ks -%}{%- set sel.kwh = sel.kwh + b.kwh -%}{%- set sel.eur = sel.eur + b.eur -%}{%- set sel.bes = sel.bes + b.bes -%}{%- set sel.n = sel.n + b.n -%}{%- set sel.dev = dict(sel.dev, **{d: b}) -%}{%- endfor -%}
+{%- set a = {'kwh': sel.kwh, 'eur': sel.eur, 'bes': sel.bes, 'n': sel.n, 'dev': sel.dev} -%}
+{%- endif -%}
+<tr><td style="padding:22px 28px 0;">{{ head(k) }}</td></tr>
+<tr><td style="padding:0 24px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>{{ tile(t('r_use'), nm(a.kwh, 1) ~ ' kWh', t('r_runs', a.n)) }}{{ tile(t('r_cost'), cur(a.eur), t('r_est_grid')) }}{{ tile(t('r_saved'), cur(a.bes), t('r_vs_avg'), '#15803D' if a.bes >= 0 else '#B91C1C') }}{{ tile(t('r_without'), cur(a.eur + a.bes), t('r_at_avg')) }}</tr></table></td></tr>
+<tr><td style="padding:14px 28px 0;">{{ head(t('r_by_device')) }}</td></tr>
+<tr><td style="padding:0 24px 8px;"><table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-collapse:collapse;">
+{%- for d, b in (a.dev | default({})).items() -%}<tr style="border-top:1px solid #E5E7EB;"><td style="padding:8px 10px;font-size:13px;">{{ ((c.devices | selectattr('id','eq',d) | list | first) | default({'name': d})).name }}</td><td style="padding:8px 10px;font-size:13px;">{{ t('r_runs', b.n) }}</td><td style="padding:8px 10px;font-size:13px;">{{ nm(b.kwh, 1) }} kWh</td><td style="padding:8px 10px;font-size:13px;">{{ cur(b.eur) }}</td><td style="padding:8px 10px;font-size:13px;color:{{ '#15803D' if b.bes >= 0 else '#B91C1C' }};">{{ cur(b.bes) }}</td></tr>{%- endfor -%}
+</table></td></tr>
+{%- else -%}<tr><td style="padding:22px 28px;font-size:14px;color:#6B7280;">{{ t('r_no_stats') }}</td></tr>{%- endif -%}
+<tr><td style="padding:6px 28px 14px;"><p style="margin:0;font-size:12px;color:#6B7280;">{{ t('r_stats_note') }}</p></td></tr>
+{%- endmacro -%}
+
+{%- macro sp_report_title(kind, day='', days=7, key='') -%}
+{%- set d = day if day else now().strftime('%Y-%m-%d') -%}
+{%- set dd = as_timestamp(d ~ 'T12:00:00') | timestamp_custom('%d/%m/%Y') -%}
+{{- {'today': t('r_today', now().strftime('%H:%M')), 'day': t('r_day', dd), 'night': t('r_night', dd), 'week': t('r_week'), 'month': t('r_month'), 'year': t('r_year'), 'diagnostics': t('r_diag', days), 'plan': t('r_plan'), 'all': t('r_today', now().strftime('%H:%M'))}.get(kind, 'Slotplanner') -}}
+{%- endmacro -%}
+
+{%- macro sp_report_subject(kind, day='', days=7, key='') -%}
+{%- if kind == 'night' -%}
+{%- set dd = sp_day_j(day or (now() - timedelta(days=1)).strftime('%Y-%m-%d')) | from_json -%}
+{%- set l = runs_j(dd[0], dd[1], []) | from_json -%}{%- set ns = namespace(b=0) -%}{%- for x in l -%}{%- set ns.b = ns.b + (x.p.m | default({})).bes | default(0) -%}{%- endfor -%}
+{{- t('mail_subject_night', sp_report_title(kind, day, days, key), cur(ns.b) | replace('&nbsp;', ' ')) -}}
+{%- else -%}{{- t('mail_subject', sp_report_title(kind, day, days, key)) -}}{%- endif -%}
+{%- endmacro -%}
+
+{#- Main macro. ks = list of device ids (empty = all). -#}
+{%- macro sp_report(kind, day='', days=7, ks=[], key='') -%}
+{%- set today = now().strftime('%Y-%m-%d') -%}
+{%- set d = day if day else today -%}
+{%- set sub = {'today': t('r_sub_day'), 'day': t('r_sub_day'), 'night': t('r_sub_day'), 'week': t('r_sub_period'), 'month': t('r_sub_period'), 'year': t('r_sub_period'), 'diagnostics': t('r_sub_diag'), 'plan': t('r_sub_plan'), 'all': t('r_sub_day')}.get(kind, '') -%}
+{%- set body -%}
+{%- if kind == 'today' -%}{{ day_body(today, ks) }}
+{%- elif kind in ['day','night'] -%}{{ day_body(d, ks) }}{%- if kind == 'night' -%}{{ plan_body(ks) }}{%- endif -%}
+{%- elif kind in ['week','month','year'] -%}{{ period_body(kind, key, ks) }}
+{%- elif kind == 'diagnostics' -%}{{ diag_body(days, ks) }}
+{%- elif kind == 'plan' -%}{{ plan_body(ks) }}
+{%- elif kind == 'all' -%}{{ day_body(today, ks) }}{{ plan_body(ks) }}{{ period_body('week', '', ks) }}{{ diag_body(7, ks) }}
+{%- endif -%}
+{%- endset -%}
+{{ wrap(sp_report_title(kind, day, days, key) | trim, sub, body) }}
+{%- endmacro -%}

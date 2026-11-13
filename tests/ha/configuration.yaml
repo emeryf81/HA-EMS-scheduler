@@ -1,0 +1,25 @@
+# Test configuration: a mock house to try the Slotplanner without real devices.
+homeassistant:
+  name: Slotplanner test
+  latitude: 51.2
+  longitude: 4.6
+  elevation: 10
+  unit_system: metric
+  time_zone: Europe/Brussels
+  currency: EUR
+  country: BE
+  packages: !include_dir_named packages
+
+http:
+logbook:
+history:
+sun:
+frontend:
+api:
+config:
+recorder:
+  purge_keep_days: 1
+input_boolean:
+input_number:
+input_select:
+notify:

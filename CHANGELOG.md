@@ -9,7 +9,7 @@ Fixes from the second code review.
 - An active plan that runs past its block keeps holding that block in the overlap and capacity checks and in the search for new blocks.
 - Card: a negative day average no longer turns a lower price into "above average".
 - Card: when the chosen day has no prices any more (for example after midnight), the chart goes back to today instead of disappearing with its day buttons.
-- Card: a custom device whose `ready_entity` is not on shows as not ready, like the planner itself.
+- Card: a custom device whose `ready_entity` is not on shows as not ready, like the planner itself, and the card redraws when that entity changes.
 - The card test plans two devices in one block first and checks that the car is refused there.
 
 ## 1.0.1

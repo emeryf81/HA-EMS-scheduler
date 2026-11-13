@@ -100,7 +100,7 @@ class SlotplannerCard extends HTMLElement {
     this._h = h;
     if (!this.shadowRoot) { this.attachShadow({ mode: 'open' }); this._timer = setInterval(() => { this._sig = ''; this._render(); }, 30000); }
     const ids = ['config', 'state', 'slots', 'prices', 'history', 'stats'].map((k) => `sensor.slotplanner_${k}`);
-    const devs = (this._cfg().devices || []).flatMap((d) => [d.status, d.switch, d.power_sensor, d.soc, d.cable, d.door, d.remote].filter(Boolean));
+    const devs = (this._cfg().devices || []).flatMap((d) => [d.status, d.switch, d.power_sensor, d.soc, d.cable, d.door, d.remote, d.ready_entity].filter(Boolean));
     const sig = ids.concat(devs).map((e) => (h.states[e] ? h.states[e].last_updated : '')).join('|') + this._tab;
     if (sig === this._sig) return;
     this._sig = sig;

@@ -1,0 +1,153 @@
+# Mock devices and price/solar sources for testing.
+input_select:
+  mock_dishwasher_status:
+    name: Mock dishwasher status
+    options: ["off", "programmed", "in_use", "end"]
+    initial: "programmed"
+input_boolean:
+  mock_dishwasher_door:
+    name: Mock dishwasher door
+    initial: false
+  mock_dishwasher_remote:
+    name: Mock dishwasher remote
+    initial: true
+  mock_pool:
+    name: Mock pool relay
+    initial: false
+  mock_charger:
+    name: Mock charger relay
+    initial: false
+  mock_car_plugged:
+    name: Mock car plugged in
+    initial: true
+  mock_peak:
+    name: Mock peak guard
+    initial: false
+input_number:
+  mock_soc:
+    name: Mock car SoC
+    min: 0
+    max: 100
+    step: 1
+    initial: 40
+  mock_solar_today:
+    name: Mock solar today
+    min: 0
+    max: 60
+    step: 0.1
+    initial: 12
+  mock_solar_tomorrow:
+    name: Mock solar tomorrow
+    min: 0
+    max: 60
+    step: 0.1
+    initial: 18
+
+template:
+  - sensor:
+      - name: "Dishwasher status"
+        unique_id: mock_dishwasher_status_sensor
+        state: "{{ states('input_select.mock_dishwasher_status') }}"
+      - name: "Dishwasher plug power"
+        unique_id: mock_dishwasher_power
+        unit_of_measurement: W
+        device_class: power
+        state: "{{ 1900 if is_state('input_select.mock_dishwasher_status', 'in_use') else 1 }}"
+      - name: "Pool pump power"
+        unique_id: mock_pool_power
+        unit_of_measurement: W
+        device_class: power
+        state: "{{ 420 if is_state('input_boolean.mock_pool', 'on') else 0 }}"
+      - name: "Charger power"
+        unique_id: mock_charger_power
+        unit_of_measurement: W
+        device_class: power
+        state: "{{ 7200 if is_state('input_boolean.mock_charger', 'on') and states('input_number.mock_soc') | float < 100 else 0 }}"
+      - name: "Car battery level"
+        unique_id: mock_car_soc
+        unit_of_measurement: "%"
+        state: "{{ states('input_number.mock_soc') }}"
+      - name: "Energy production today"
+        unique_id: mock_solar_today
+        unit_of_measurement: kWh
+        state: "{{ states('input_number.mock_solar_today') }}"
+      - name: "Energy production tomorrow"
+        unique_id: mock_solar_tomorrow
+        unit_of_measurement: kWh
+        state: "{{ states('input_number.mock_solar_tomorrow') }}"
+      - name: "Grid power"
+        unique_id: mock_grid_power
+        unit_of_measurement: W
+        state: "{{ (states('sensor.dishwasher_plug_power') | float(0) + states('sensor.pool_pump_power') | float(0) + states('sensor.charger_power') | float(0) + 300) | round(0) }}"
+      - name: "Monthly peak"
+        unique_id: mock_month_peak
+        unit_of_measurement: kW
+        state: "4.2"
+      # Nord Pool (HACS) style: raw_today / raw_tomorrow with start and value, per hour.
+      - name: "Nordpool kWh BE"
+        unique_id: mock_nordpool
+        unit_of_measurement: "EUR/kWh"
+        state: "0.25"
+        attributes:
+          raw_today: >-
+            {% set d0 = today_at('00:00') %}{% set ns = namespace(v=[]) %}
+            {% for h in range(24) %}{% set st = d0 + timedelta(hours=h) %}
+            {% set ns.v = ns.v + [{'start': st.isoformat(), 'end': (st + timedelta(hours=1)).isoformat(), 'value': (0.22 + 0.12 * (sin((h - 13) / 24 * 2 * pi)) * -1 + (0.1 if h in [7, 8, 18, 19, 20] else 0)) | round(4)}] %}{% endfor %}{{ ns.v }}
+          raw_tomorrow: >-
+            {% set d0 = today_at('00:00') + timedelta(days=1) %}{% set ns = namespace(v=[]) %}
+            {% for h in range(24) %}{% set st = d0 + timedelta(hours=h) %}
+            {% set ns.v = ns.v + [{'start': st.isoformat(), 'end': (st + timedelta(hours=1)).isoformat(), 'value': (0.24 + 0.10 * (sin((h - 13) / 24 * 2 * pi)) * -1 + (0.1 if h in [7, 8, 18, 19, 20] else 0)) | round(4)}] %}{% endfor %}{{ ns.v }}
+
+  - button:
+      - name: "Dishwasher start"
+        unique_id: mock_dishwasher_start
+        press:
+          - if:
+              - condition: state
+                entity_id: input_select.mock_dishwasher_status
+                state: programmed
+              - condition: state
+                entity_id: input_boolean.mock_dishwasher_door
+                state: "off"
+              - condition: state
+                entity_id: input_boolean.mock_dishwasher_remote
+                state: "on"
+            then:
+              - action: input_select.select_option
+                target:
+                  entity_id: input_select.mock_dishwasher_status
+                data:
+                  option: in_use
+  - binary_sensor:
+      - name: "Dishwasher door"
+        unique_id: mock_dishwasher_door_bs
+        state: "{{ is_state('input_boolean.mock_dishwasher_door', 'on') }}"
+      - name: "Dishwasher remote control"
+        unique_id: mock_dishwasher_remote_bs
+        state: "{{ is_state('input_boolean.mock_dishwasher_remote', 'on') }}"
+      - name: "Car plugged in"
+        unique_id: mock_car_plugged_bs
+        state: "{{ is_state('input_boolean.mock_car_plugged', 'on') }}"
+  - switch:
+      - name: "Pool pump"
+        unique_id: mock_pool_switch
+        state: "{{ is_state('input_boolean.mock_pool', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.mock_pool
+        turn_off:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.mock_pool
+      - name: "Charger charging"
+        unique_id: mock_charger_switch
+        state: "{{ is_state('input_boolean.mock_charger', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.mock_charger
+        turn_off:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.mock_charger

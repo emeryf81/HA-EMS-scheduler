@@ -1,0 +1,435 @@
+{#- Slotplanner core macros. Do not edit: your settings live in slotplanner_config.jinja.
+    Macros ending in _j return JSON; use them with |from_json. Imported macros get no context
+    from the caller, so everything they need is passed as an argument or read from states. -#}
+{%- from 'slotplanner_config.jinja' import slotplanner_config -%}
+{%- from 'slotplanner_i18n.jinja' import t -%}
+
+{#- ------------------------------------------------------------------ config -#}
+{%- macro sp_cfg_j() -%}
+{%- set c = slotplanner_config() | from_json -%}
+{%- set g = dict({'language':'en','currency':'€','block_hours':3,'blocks_per_day':6,'fetch_time':'17:00','autoplan_time':'00:00','report_time':'00:05'}, **(c.general or {})) -%}
+{%- set g = dict(g, block_hours=[[g.block_hours|int(3),1]|max,6]|min, blocks_per_day=[[g.blocks_per_day|int(6),1]|max,12]|min) -%}
+{%- set pr = dict({'source':'custom','today':'','tomorrow':'','config_entry':'','area':'','multiply':1.0,'add':0.0,'attributes':[],'time_key':'','price_key':'','unit':'kwh'}, **(c.prices or {})) -%}
+{%- set preset = {
+  'frank': {'attributes':['prices'],'time_key':'from','price_key':'total_price_eur_kwh','unit':'kwh'},
+  'nordpool_hacs': {'attributes':['raw_today','raw_tomorrow'],'time_key':'start','price_key':'value','unit':'kwh'},
+  'entsoe': {'attributes':['prices_today','prices_tomorrow','prices'],'time_key':'time','price_key':'price','unit':'kwh'},
+  'nordpool': {'attributes':[],'time_key':'start','price_key':'price','unit':'mwh'},
+  'tibber': {'attributes':[],'time_key':'start_time','price_key':'price','unit':'kwh'},
+}.get(pr.source) -%}
+{%- if preset -%}{%- set pr = dict(pr, **preset) -%}{%- endif -%}
+{%- set so = dict({'source':'none','today':'','tomorrow':'','feed_in_price':0,'covers_kw':2.0,'correction':{}}, **(c.solar or {})) -%}
+{%- set gr = dict({'power_sensor':'','pv_power_sensor':'','monthly_peak_sensor':'','base_load_kw':0.7,'max_devices_per_block':2,'pause_entity':''}, **(c.grid or {})) -%}
+{%- set no = dict({'email_service':'','remind_minutes':45}, **(c.notifications or {})) -%}
+{%- set base = {'name':'','icon':'mdi:power-plug','power_kw':2.0,'power_sensor':'','autoplan':'off','autoplan_if':'','max_blocks':1,'start_actions':[],'stop_actions':[]} -%}
+{%- set per = {
+  'appliance': {'status':'','start_button':'','door':'','remote':'','running_states':['in_use','running'],'ready_states':['programmed','waiting_to_start'],'pause_states':['pause','rinse_hold','program_interrupted'],'icon':'mdi:washing-machine'},
+  'switch': {'switch':'','finish_below_w':0,'finish_after_min':0},
+  'climate': {'climates':[],'hvac_mode':'heat','temperature':0,'icon':'mdi:air-conditioner'},
+  'ev': {'switch':'','soc':'','target_soc':80,'battery_kwh':50,'charge_kw':7.4,'cable':'','icon':'mdi:car-electric'},
+  'custom': {'ready_entity':'','running_entity':''},
+} -%}
+{%- set ns = namespace(d=[]) -%}
+{%- for x in c.devices or [] if x.id is defined and x.id -%}
+{%- set t = x.type if x.type is defined and x.type in per else 'custom' -%}
+{%- set d = dict(dict(base, **per[t]), **x) -%}
+{%- set d = dict(d, type=t, name=(d.name or d.id), max_blocks=[d.max_blocks|int(1),1]|max, power_kw=d.power_kw|float(2.0)) -%}
+{%- set ns.d = ns.d + [d] -%}
+{%- endfor -%}
+{{- {'general':g,'prices':pr,'solar':so,'grid':gr,'people':c.people or [],'notifications':no,'devices':ns.d} | tojson -}}
+{%- endmacro -%}
+
+{#- Setup check: list of problems in the configuration. -#}
+{%- macro sp_check_config_j() -%}
+{%- set c = sp_cfg_j() | from_json -%}
+{%- set ns = namespace(e=[]) -%}
+{%- macro chk(eid, what) -%}{%- if eid is string and eid and states(eid) == 'unknown' and state_attr(eid, 'friendly_name') is none -%}{{ what }}: {{ eid }}{%- endif -%}{%- endmacro -%}
+{%- for w in [[c.prices.today,'prices.today'],[c.prices.tomorrow,'prices.tomorrow'],[c.solar.today,'solar.today'],[c.solar.tomorrow,'solar.tomorrow'],[c.grid.power_sensor,'grid.power_sensor'],[c.grid.monthly_peak_sensor,'grid.monthly_peak_sensor'],[c.grid.pause_entity,'grid.pause_entity']] -%}
+{%- set r = chk(w[0], w[1]) | trim -%}{%- if r -%}{%- set ns.e = ns.e + [r ~ ' not found'] -%}{%- endif -%}
+{%- endfor -%}
+{%- if c.prices.source in ['frank','nordpool_hacs','entsoe','custom'] and not c.prices.today -%}{%- set ns.e = ns.e + ['prices.today is empty'] -%}{%- endif -%}
+{%- if c.prices.source == 'nordpool' and not c.prices.config_entry -%}{%- set ns.e = ns.e + ['prices.config_entry is empty (needed for the official Nord Pool integration)'] -%}{%- endif -%}
+{%- if c.prices.source not in ['frank','nordpool_hacs','entsoe','nordpool','tibber','custom'] -%}{%- set ns.e = ns.e + ['prices.source "' ~ c.prices.source ~ '" is unknown'] -%}{%- endif -%}
+{%- set ids = c.devices | map(attribute='id') | list -%}
+{%- if ids | unique | list | count != ids | count -%}{%- set ns.e = ns.e + ['two devices have the same id'] -%}{%- endif -%}
+{%- if not c.devices -%}{%- set ns.e = ns.e + ['no devices configured'] -%}{%- endif -%}
+{%- for d in c.devices -%}
+{%- if d.id is not search('^[a-z0-9_]+$') -%}{%- set ns.e = ns.e + [d.id ~ ': id may only hold a-z, 0-9 and _'] -%}{%- endif -%}
+{%- set keys = {'appliance':['status','start_button'],'switch':['switch'],'climate':[],'ev':[],'custom':[]}[d.type] -%}
+{%- for k in keys if not d[k] -%}{%- set ns.e = ns.e + [d.id ~ ': ' ~ k ~ ' is empty'] -%}{%- endfor -%}
+{%- for k in ['status','start_button','door','remote','switch','soc','cable','power_sensor','autoplan_if','ready_entity','running_entity'] if d[k] is defined and d[k] -%}
+{%- set r = chk(d[k], d.id ~ '.' ~ k) | trim -%}{%- if r -%}{%- set ns.e = ns.e + [r ~ ' not found'] -%}{%- endif -%}
+{%- endfor -%}
+{%- if d.type == 'climate' and not d.climates -%}{%- set ns.e = ns.e + [d.id ~ ': climates is empty'] -%}{%- endif -%}
+{%- if d.type == 'ev' and not d.switch and not d.start_actions -%}{%- set ns.e = ns.e + [d.id ~ ': give a switch or start_actions to control charging'] -%}{%- endif -%}
+{%- if d.autoplan == 'ev' and d.type != 'ev' -%}{%- set ns.e = ns.e + [d.id ~ ': autoplan "ev" only works for type ev'] -%}{%- endif -%}
+{%- endfor -%}
+{%- for p in c.people -%}
+{%- if not p.id is defined or not p.id -%}{%- set ns.e = ns.e + ['a person has no id'] -%}{%- endif -%}
+{%- endfor -%}
+{{- ns.e | tojson -}}
+{%- endmacro -%}
+
+{#- ------------------------------------------------------------- shortcuts -#}
+{%- macro sp_block_s() -%}{{ (sp_cfg_j() | from_json).general.block_hours | int * 3600 }}{%- endmacro -%}
+{%- macro sp_lang() -%}{{ (sp_cfg_j() | from_json).general.language }}{%- endmacro -%}
+{%- macro sp_dev_j(d) -%}{{ ((sp_cfg_j() | from_json).devices | selectattr('id','eq',d) | list | first | default({})) | tojson }}{%- endmacro -%}
+{%- macro sp_name(d) -%}{{ (sp_dev_j(d) | from_json).name | default(d) }}{%- endmacro -%}
+
+{#- Planner state: plans, settings and the entities the planner switched on. -#}
+{%- macro sp_state_j() -%}
+{%- set a = states.sensor.slotplanner_state.attributes if states.sensor.slotplanner_state is defined and states.sensor.slotplanner_state else {} -%}
+{{- {'plans': a.plans | default([]), 'settings': a.settings | default({}), 'touched': a.touched | default([]), 'rev': a.rev | default(0) | int} | tojson -}}
+{%- endmacro -%}
+
+{#- Settings with defaults filled in. -#}
+{%- macro sp_settings_j() -%}
+{%- set c = sp_cfg_j() | from_json -%}{%- set s = (sp_state_j() | from_json).settings -%}
+{%- set first = (c.people | map(attribute='id') | list)[:1] -%}
+{%- set ap = namespace(d={}) -%}
+{%- for d in c.devices -%}{%- set ap.d = dict(ap.d, **{d.id: (s.autoplan[d.id] if s.autoplan is defined and d.id in s.autoplan else d.autoplan != 'off')}) -%}{%- endfor -%}
+{{- {'enabled': s.enabled | default(true), 'autoplan': ap.d, 'subs': s.subs | default([]),
+     'nightly': s.nightly | default(first), 'overview': s.overview | default(first),
+     'early': s.early | default(first), 'remind': s.remind | default(c.people | map(attribute='id') | list),
+     'replanned': s.replanned | default({})} | tojson -}}
+{%- endmacro -%}
+
+{#- ----------------------------------------------------------------- prices -#}
+{#- Turn a raw list of price records into [[epoch, price per kWh incl. multiply/add], ...]
+    in quarter hours. Hourly sources are split in four. -#}
+{%- macro sp_norm_prices_j(raw, tk, pk, unit, mul, add) -%}
+{%- set f = 0.001 if unit == 'mwh' else 1 -%}
+{%- set ns = namespace(v=[], seen=[]) -%}
+{%- for x in raw if x is mapping and x[tk] is defined and x[pk] is defined and x[pk] is not none -%}
+{%- set t = as_timestamp(x[tk], 0) | int -%}
+{%- if t > 0 and t not in ns.seen -%}{%- set ns.seen = ns.seen + [t] -%}{%- set ns.v = ns.v + [[t, ((x[pk] | float(0)) * f * (mul | float(1)) + (add | float(0))) | round(5)]] -%}{%- endif -%}
+{%- endfor -%}
+{%- set v = ns.v | sort(attribute=0) -%}
+{%- set step = namespace(s=900) -%}
+{%- if v | count > 1 -%}{%- set step.s = [v[1][0] - v[0][0], 900] | max -%}{%- endif -%}
+{%- if step.s >= 3600 -%}
+{%- set q = namespace(v=[]) -%}{%- for x in v -%}{%- for i in range(4) -%}{%- set q.v = q.v + [[x[0] + i * 900, x[1]]] -%}{%- endfor -%}{%- endfor -%}
+{{- q.v | tojson -}}
+{%- else -%}{{- v | tojson -}}{%- endif -%}
+{%- endmacro -%}
+
+{#- Raw records for the attribute based sources. -#}
+{%- macro sp_price_raw_attr_j() -%}
+{%- set c = (sp_cfg_j() | from_json).prices -%}
+{%- set ns = namespace(v=[]) -%}
+{%- for e in [c.today, c.tomorrow] if e -%}{%- for a in c.attributes -%}
+{%- set l = state_attr(e, a) -%}{%- if l is iterable and l is not string -%}{%- set ns.v = ns.v + (l | list) -%}{%- endif -%}
+{%- endfor -%}{%- endfor -%}
+{{- ns.v | tojson -}}
+{%- endmacro -%}
+
+{#- Normalised prices as stored by script.slotplanner_fetch_prices. -#}
+{%- macro sp_prices_j() -%}{{ (state_attr('sensor.slotplanner_prices','prices') or []) | tojson }}{%- endmacro -%}
+
+{#- Price at a moment (epoch), or the mean of the day when unknown. -#}
+{%- macro sp_price_at(ts) -%}
+{%- set p = sp_prices_j() | from_json -%}{%- set t = (ts | int) // 900 * 900 -%}
+{%- set hit = p | selectattr(0,'eq',t) | list -%}
+{{- hit[0][1] if hit else ((p | map(attribute=1) | sum / p | count) if p else 0) -}}
+{%- endmacro -%}
+
+{#- Start and end (epoch) of the local day in the Home Assistant time zone. x is an epoch or a date 'YYYY-MM-DD'.
+    Days of 23 or 25 hours (daylight saving) are handled. -#}
+{%- macro sp_day_j(x) -%}
+{%- set d = as_datetime(x ~ 'T12:00:00').date() if x is string else as_local(as_datetime(x | int)).date() -%}
+{%- set tz = now().tzinfo -%}
+{%- set a = as_datetime(d.isoformat() ~ 'T00:00:00').replace(tzinfo=tz) -%}
+{%- set b = as_datetime((d + timedelta(days=1)).isoformat() ~ 'T00:00:00').replace(tzinfo=tz) -%}
+{{- [as_timestamp(a) | int, as_timestamp(b) | int] | tojson -}}
+{%- endmacro -%}
+
+{#- Mean price of the local day that holds ts. -#}
+{%- macro sp_day_mean(ts) -%}
+{%- set dd = sp_day_j(ts | int) | from_json -%}
+{%- set p = (sp_prices_j() | from_json) | selectattr(0,'ge',dd[0]) | selectattr(0,'lt',dd[1]) | map(attribute=1) | list -%}
+{{- (p | sum / p | count) if p else sp_price_at(ts) -}}
+{%- endmacro -%}
+
+{%- macro sp_feed_in() -%}
+{%- set f = (sp_cfg_j() | from_json).solar.feed_in_price -%}
+{{- states(f) | float(0) if f is string and '.' in f and not f | regex_match('^[0-9.]+$') else f | float(0) -}}
+{%- endmacro -%}
+
+{#- ------------------------------------------------------------------ solar -#}
+{#- Expected solar power in kW per quarter hour for the given epochs: {"epoch": kW}. -#}
+{%- macro sp_solar_j(ts_list) -%}
+{%- set s = (sp_cfg_j() | from_json).solar -%}
+{%- set ns = namespace(d={}) -%}
+{%- set corr = s.correction or {} -%}
+{%- set fo = states(corr.morning) | float(1) if corr.morning is defined and corr.morning else 1 -%}
+{%- set fm = states(corr.midday) | float(1) if corr.midday is defined and corr.midday else 1 -%}
+{%- set fa = states(corr.evening) | float(1) if corr.evening is defined and corr.evening else 1 -%}
+{%- if s.source == 'forecast_solar' -%}
+{%- set sr = as_local(as_datetime(state_attr('sun.sun','next_rising'))) if state_attr('sun.sun','next_rising') else none -%}
+{%- set ss = as_local(as_datetime(state_attr('sun.sun','next_setting'))) if state_attr('sun.sun','next_setting') else none -%}
+{%- set a = (sr.hour * 60 + sr.minute) if sr else 480 -%}{%- set b = (ss.hour * 60 + ss.minute) if ss else 1020 -%}
+{%- set D = [b - a, 60] | max -%}
+{%- set today = now().date() -%}
+{%- set ev = states(s.today) | float(0) if s.today else 0 -%}{%- set em = states(s.tomorrow) | float(0) if s.tomorrow else 0 -%}
+{%- for t in ts_list -%}
+{%- set d = as_local(as_datetime(t | int)) -%}{%- set m = d.hour * 60 + d.minute + 7.5 -%}
+{%- set E = ev if d.date() == today else (em if (d.date() - today).days == 1 else 0) -%}
+{%- set fz = fo if d.hour < 11 else (fm if d.hour < 16 else fa) -%}
+{%- set z = (E / (D / 60) * 2 * (sin(pi * (m - a) / D)) ** 2) * fz if (m > a and m < b) else 0 -%}
+{%- set ns.d = dict(ns.d, **{(t | int | string): z | round(3)}) -%}
+{%- endfor -%}
+{%- elif s.source == 'solcast' -%}
+{%- set det = namespace(m={}) -%}
+{%- for e in [s.today, s.tomorrow] if e -%}{%- for x in state_attr(e, 'detailedForecast') or state_attr(e, 'detailed_forecast') or [] -%}
+{%- set t0 = as_timestamp(x.period_start, 0) | int -%}{%- set det.m = dict(det.m, **{(t0 | string): x.pv_estimate | float(0), ((t0 + 900) | string): x.pv_estimate | float(0)}) -%}
+{%- endfor -%}{%- endfor -%}
+{%- for t in ts_list -%}
+{%- set d = as_local(as_datetime(t | int)) -%}{%- set fz = fo if d.hour < 11 else (fm if d.hour < 16 else fa) -%}
+{%- set ns.d = dict(ns.d, **{(t | int | string): ((det.m.get(t | int | string, 0)) * fz) | round(3)}) -%}
+{%- endfor -%}
+{%- else -%}
+{%- for t in ts_list -%}{%- set ns.d = dict(ns.d, **{(t | int | string): 0}) -%}{%- endfor -%}
+{%- endif -%}
+{{- ns.d | tojson -}}
+{%- endmacro -%}
+
+{#- Quarter hours from t0 on: [epoch, price, solar kW, effective price for a device of kw]. -#}
+{%- macro sp_quarters_j(t0, kw) -%}
+{%- set c = sp_cfg_j() | from_json -%}
+{%- set p = (sp_prices_j() | from_json) | selectattr(0,'ge',t0 | int) | list -%}
+{%- set z = sp_solar_j(p | map(attribute=0) | list) | from_json -%}
+{%- set inj = sp_feed_in() | float(0) -%}{%- set cov = [kw | float(2), 0.1] | max -%}
+{%- set ns = namespace(v=[]) -%}
+{%- for x in p -%}{%- set zz = z.get(x[0] | string, 0) | float(0) -%}{%- set f = [zz / cov, 1] | min -%}
+{%- set ns.v = ns.v + [[x[0], x[1], zz, (x[1] * (1 - f) + inj * f) | round(5)]] -%}{%- endfor -%}
+{{- ns.v | tojson -}}
+{%- endmacro -%}
+
+{#- ------------------------------------------------------------- devices -#}
+{#- Live check of a device: {"ready":bool,"running":bool,"reason":"..."} -#}
+{%- macro sp_check_j(d) -%}
+{%- set x = sp_dev_j(d) | from_json -%}
+{%- set na = ['unavailable','unknown'] -%}
+{%- set ns = namespace(ready=true, run=false, why=[], known=true) -%}
+{%- if not x -%}{%- set ns.ready = false -%}{%- set ns.why = [t('why_unknown')] -%}
+{%- elif x.type == 'appliance' -%}
+{%- set st = states(x.status) -%}
+{%- set ns.known = st not in na -%}
+{%- set ns.run = st in x.running_states or st in x.pause_states -%}
+{%- if st in na -%}{%- set ns.why = ns.why + [t('why_offline')] -%}{%- endif -%}
+{%- if x.door and is_state(x.door,'on') -%}{%- set ns.why = ns.why + [t('why_door')] -%}{%- endif -%}
+{%- if x.remote and not is_state(x.remote,'on') -%}{%- set ns.why = ns.why + [t('why_remote')] -%}{%- endif -%}
+{%- if st not in x.ready_states and not ns.run and st not in na -%}{%- set ns.why = ns.why + [t('why_program', st)] -%}{%- endif -%}
+{%- if states(x.start_button) == 'unavailable' or (states(x.start_button) == 'unknown' and state_attr(x.start_button, 'friendly_name') is none) -%}{%- set ns.why = ns.why + [t('why_button')] -%}{%- endif -%}
+{%- set ns.ready = ns.why | count == 0 -%}
+{%- elif x.type in ['switch','ev'] and x.switch -%}
+{%- set ns.run = is_state(x.switch,'on') -%}
+{%- if states(x.switch) in na -%}{%- set ns.ready = false -%}{%- set ns.why = [t('why_offline')] -%}{%- endif -%}
+{%- if x.type == 'ev' and x.cable and is_state(x.cable,'off') -%}{%- set ns.ready = false -%}{%- set ns.why = ns.why + [t('why_cable')] -%}{%- endif -%}
+{%- elif x.type == 'ev' -%}
+{%- if x.cable and is_state(x.cable,'off') -%}{%- set ns.ready = false -%}{%- set ns.why = [t('why_cable')] -%}{%- endif -%}
+{%- elif x.type == 'climate' -%}
+{%- set ok = x.climates | reject('is_state','unavailable') | reject('is_state','unknown') | list -%}
+{%- set ns.run = x.climates | reject('is_state','off') | reject('is_state','unavailable') | list | count > 0 -%}
+{%- if not ok -%}{%- set ns.ready = false -%}{%- set ns.why = [t('why_offline')] -%}{%- endif -%}
+{%- elif x.type == 'custom' -%}
+{%- if x.ready_entity and not is_state(x.ready_entity,'on') -%}{%- set ns.ready = false -%}{%- set ns.why = [t('why_notready')] -%}{%- endif -%}
+{%- if x.running_entity -%}{%- set ns.run = is_state(x.running_entity,'on') -%}{%- set ns.known = states(x.running_entity) not in na -%}{%- endif -%}
+{%- endif -%}
+{{- {'ready': ns.ready, 'running': ns.run, 'known': ns.known, 'reason': ns.why | join(', ')} | tojson -}}
+{%- endmacro -%}
+
+{#- Live power of a device in W (0 without a power sensor). -#}
+{%- macro sp_power(d) -%}{%- set x = sp_dev_j(d) | from_json -%}{{ states(x.power_sensor) | float(0) if x.power_sensor else 0 }}{%- endmacro -%}
+
+{#- Has the device reached its goal (EV at target) -#}
+{%- macro sp_ev_full(d) -%}
+{%- set x = sp_dev_j(d) | from_json -%}
+{%- set tgt = (states(x.target_soc) | float(80)) if x.target_soc is string else x.target_soc | float(80) -%}
+{{- 1 if (x.type == 'ev' and x.soc and states(x.soc) | float(-1) >= tgt) else 0 -}}
+{%- endmacro -%}
+
+{#- How many blocks the car needs to reach its target. -#}
+{%- macro sp_ev_blocks(d) -%}
+{%- set x = sp_dev_j(d) | from_json -%}
+{%- set soc = states(x.soc) | float(-1) if x.soc else -1 -%}
+{%- set tgt = (states(x.target_soc) | float(80)) if x.target_soc is string else x.target_soc | float(80) -%}
+{%- set learned = ((states.sensor.slotplanner_stats.attributes.learn | default({})).get(d ~ '_kwh') or []) if states.sensor.slotplanner_stats is defined and states.sensor.slotplanner_stats else [] -%}
+{%- set per = (learned | sum / learned | count) if learned | count >= 3 else x.charge_kw | float(7.4) * (sp_block_s() | int / 3600) * 0.9 -%}
+{%- if soc < 0 -%}1{%- elif soc >= tgt -%}0{%- else -%}{{ [[(((tgt - soc) / 100 * x.battery_kwh | float(50) / [per, 1] | max) | round(0, 'ceil')) | int, 1] | max, x.max_blocks | int(3)] | min }}{%- endif -%}
+{%- endmacro -%}
+
+{#- Peak power of a device in kW: learned (two runs) or configured. -#}
+{%- macro sp_peak_kw(d) -%}
+{%- set l = ((states.sensor.slotplanner_stats.attributes.learn | default({})).get(d ~ '_pk') or []) if states.sensor.slotplanner_stats is defined and states.sensor.slotplanner_stats else [] -%}
+{{- ((l | max) / 1000) | round(2) if l | count >= 2 else (sp_dev_j(d) | from_json).power_kw | default(2.0) -}}
+{%- endmacro -%}
+
+{#- Learned run time in minutes (two runs), else 0. -#}
+{%- macro sp_duration(d) -%}
+{%- set l = ((states.sensor.slotplanner_stats.attributes.learn | default({})).get(d ~ '_min') or []) if states.sensor.slotplanner_stats is defined and states.sensor.slotplanner_stats else [] -%}
+{{- (l | sum / l | count) | round(0) | int if l | count >= 2 else 0 -}}
+{%- endmacro -%}
+
+{#- Share of what the devices use right now that comes from the grid (0..1). -#}
+{%- macro sp_grid_share(active_w) -%}
+{%- set e = (sp_cfg_j() | from_json).grid.power_sensor -%}
+{%- if not e or states(e) in ['unavailable','unknown'] -%}1{%- else -%}
+{%- set imp = [states(e) | float(0), 0] | max -%}
+{{- ([imp / active_w | float(1), 1] | min) | round(3) if active_w | float(0) > 50 else (1 if imp > 0 else 0) -}}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- Monthly peak in W (0 when unknown). -#}
+{%- macro sp_month_peak_w() -%}
+{%- set e = (sp_cfg_j() | from_json).grid.monthly_peak_sensor -%}
+{%- set v = states(e) | float(0) if e else 0 -%}
+{%- set u = state_attr(e, 'unit_of_measurement') if e else '' -%}
+{{- (v * 1000 if u == 'kW' or (v > 0 and v < 50) else v) | round(0) -}}
+{%- endmacro -%}
+
+{#- ----------------------------------------------------------- planning -#}
+{#- Window of a plan: [start, end]. Early or real starts move the window. -#}
+{%- macro sp_window_j(p, B) -%}
+{%- set s = p.rs if (p.rs | default(0) | int > 0 and p.rs | int < p.s | int) else p.s -%}
+{%- set e = s | int + B | int -%}
+{#- An active plan that runs past its block (an appliance that is not finished yet) keeps its place. -#}
+{%- set nu = as_timestamp(now()) | int -%}
+{%- if p.st == 'active' and e <= nu -%}{%- set e = nu + 900 -%}{%- endif -%}
+{{- [s | int, e] | tojson -}}
+{%- endmacro -%}
+
+{#- Plans that still hold a block: [[device, start], ...] -#}
+{%- macro sp_busy_j() -%}
+{%- set B = sp_block_s() | int -%}{%- set nu = as_timestamp(now()) | int -%}
+{%- set ns = namespace(v=[]) -%}
+{%- for p in (sp_state_j() | from_json).plans if p.st in ['planned','active'] -%}
+{%- set w = sp_window_j(p, B) | from_json -%}{%- if w[1] > nu -%}{%- set ns.v = ns.v + [[p.d, w[0], p.id]] -%}{%- endif -%}
+{%- endfor -%}
+{{- ns.v | tojson -}}
+{%- endmacro -%}
+
+{#- 1 when devices a and b may share a block. -#}
+{%- macro sp_pair_ok(a, b) -%}
+{%- set c = (sp_cfg_j() | from_json).grid -%}
+{%- set mp = sp_month_peak_w() | float(0) -%}
+{%- set ta = (sp_dev_j(a) | from_json).type -%}{%- set tb = (sp_dev_j(b) | from_json).type -%}
+{{- 1 if (a != b and c.max_devices_per_block | int(2) >= 2 and (mp == 0 or ((sp_peak_kw(a) | float + sp_peak_kw(b) | float + c.base_load_kw | float(0.7)) * 1000 <= [mp, 2500] | max))) else 0 -}}
+{%- endmacro -%}
+
+{#- Why device d cannot go in the block that starts at s ('' when it can). skip = plan id that is being moved. -#}
+{%- macro sp_conflict(d, s, skip) -%}
+{%- set B = sp_block_s() | int -%}{%- set s = s | int -%}
+{%- set x = sp_dev_j(d) | from_json -%}
+{%- set ns = namespace(same=0, own=0, other=[]) -%}
+{%- for b in sp_busy_j() | from_json if b[2] != skip -%}
+{%- if b[0] == d -%}{%- set ns.own = ns.own + 1 -%}{%- endif -%}
+{%- if b[1] < s + B and s < b[1] + B -%}
+{%- if b[0] == d -%}{%- set ns.same = 1 -%}{%- else -%}{%- set ns.other = ns.other + [b] -%}{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{%- if not x -%}unknown_device
+{%- elif s + B <= as_timestamp(now()) | int -%}past
+{%- elif ns.same -%}overlap_self
+{%- elif ns.own >= x.max_blocks | int(1) -%}max_blocks
+{%- elif ns.other | count > 1 -%}full
+{%- elif ns.other | count == 1 and (ns.other[0][1] != s or sp_pair_ok(d, ns.other[0][0]) | int == 0) -%}peak
+{%- endif -%}
+{%- endmacro -%}
+
+{#- Score 0..100 of the block that starts at s, compared with every block of that day. -#}
+{%- macro sp_score(s) -%}
+{%- set c = sp_cfg_j() | from_json -%}{%- set B = c.general.block_hours | int * 3600 -%}{%- set Q = B // 900 -%}
+{%- set dd = sp_day_j(s | int) | from_json -%}{%- set d0 = dd[0] -%}{%- set d1 = dd[1] -%}
+{%- set p = (sp_prices_j() | from_json) | selectattr(0,'ge',d0) | selectattr(0,'lt',d1 + B) | list -%}
+{%- set z = sp_solar_j(p | map(attribute=0) | list) | from_json -%}
+{%- set inj = sp_feed_in() | float(0) -%}{%- set cov = [c.solar.covers_kw | float(2), 0.1] | max -%}
+{%- set W = namespace(v=[], me=none) -%}
+{%- for j in range(0, [p | count - Q + 1, 0] | max) if p[j][0] < d1 -%}
+{%- if p[j + Q - 1][0] == p[j][0] + B - 900 -%}
+{%- set raw = p[j:j + Q] | map(attribute=1) | sum / Q -%}
+{%- set ee = namespace(s=0) -%}{%- for x in p[j:j + Q] -%}{%- set f = [z.get(x[0] | string, 0) | float(0) / cov, 1] | min -%}{%- set ee.s = ee.s + x[1] * (1 - f) + inj * f -%}{%- endfor -%}
+{%- set eff = ee.s / Q -%}
+{%- set W.v = W.v + [[raw, eff]] -%}{%- if p[j][0] == s | int -%}{%- set W.me = eff -%}{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{%- if W.me is not none and W.v | count > 1 -%}
+{%- set best = W.v | map(attribute=1) | min -%}{%- set worst = W.v | map(attribute=0) | max -%}
+{{- 100 if worst - best < 0.0005 else [0, [100, (100 * (worst - W.me) / (worst - best)) | round(0) | int] | min] | max -}}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- Cheapest blocks: [{s,e,p (ct/kWh),z (kW sun)}]. Blocks that hold a plan stay. -#}
+{%- macro sp_find_slots_j() -%}
+{%- set c = sp_cfg_j() | from_json -%}
+{%- set B = c.general.block_hours | int * 3600 -%}{%- set Q = c.general.block_hours | int * 4 -%}
+{%- set nu = as_timestamp(now()) | int -%}{%- set t0 = (nu // 900 + 1) * 900 -%}
+{%- set q = sp_quarters_j(t0, c.solar.covers_kw) | from_json -%}
+{%- set taken0 = (sp_busy_j() | from_json) | map(attribute=1) | unique | list -%}
+{%- set ns = namespace(taken=taken0, out=[]) -%}
+{%- set cnt = q | count -%}
+{%- for r in range(0, [c.general.blocks_per_day | int - taken0 | count, 0] | max) -%}
+{%- set b = namespace(best=99999.0, a=0, i=-1) -%}
+{%- for i in range(0, [cnt - Q + 1, 0] | max) -%}
+{%- set a = q[i][0] -%}
+{%- if q[i + Q - 1][0] == a + B - 900 -%}
+{%- set ok = namespace(v=true) -%}{%- for w in ns.taken -%}{%- if a < w + B and w < a + B -%}{%- set ok.v = false -%}{%- endif -%}{%- endfor -%}
+{%- if ok.v -%}{%- set sm = q[i:i + Q] | map(attribute=3) | sum -%}{%- if sm < b.best -%}{%- set b.best = sm -%}{%- set b.a = a -%}{%- set b.i = i -%}{%- endif -%}{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{%- if b.i >= 0 -%}{%- set ns.taken = ns.taken + [b.a] -%}{%- endif -%}
+{%- endfor -%}
+{%- set p = sp_prices_j() | from_json -%}
+{%- set z = sp_solar_j(p | map(attribute=0) | list) | from_json -%}
+{%- for w in ns.taken | sort -%}
+{%- set v = p | selectattr(0,'ge',w) | selectattr(0,'lt',w + B) | list -%}
+{%- if v -%}{%- set zz = namespace(s=0) -%}{%- for x in v -%}{%- set zz.s = zz.s + z.get(x[0] | string, 0) | float(0) -%}{%- endfor -%}
+{%- set ns.out = ns.out + [{'s': w, 'e': w + B, 'p': (v | map(attribute=1) | sum / v | count * 100) | round(2), 'z': (zz.s / v | count) | round(3), 'sc': sp_score(w) | trim | int(-1)}] -%}
+{%- endif -%}
+{%- endfor -%}
+{{- ns.out | tojson -}}
+{%- endmacro -%}
+
+{#- Cheapest free block for device d (start epoch, 0 when none). min_left = seconds the block must still run. -#}
+{%- macro sp_free_slot(d, min_left) -%}
+{%- set c = sp_cfg_j() | from_json -%}{%- set x = sp_dev_j(d) | from_json -%}
+{%- set kw = [sp_peak_kw(d) | float(2), 0.1] | max -%}
+{%- set nu = as_timestamp(now()) | int -%}
+{%- set q = sp_quarters_j(nu // 900 * 900 - 3 * 3600, kw) | from_json -%}
+{%- set b = namespace(c=999999.0, s=0) -%}
+{%- for sl in state_attr('sensor.slotplanner_slots','slots') or [] if sl.e - nu >= min_left | int(0) -%}
+{%- if (sp_conflict(d, sl.s, '') | trim) == '' -%}
+{%- set qq = q | selectattr(0,'ge',[sl.s, nu // 900 * 900] | max) | selectattr(0,'lt',sl.e) | map(attribute=3) | list -%}
+{%- set cost = (qq | sum / qq | count) if qq else sl.p / 100 -%}
+{%- if cost < b.c -%}{%- set b.c = cost -%}{%- set b.s = sl.s -%}{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{{- b.s -}}
+{%- endmacro -%}
+
+{#- Seconds after the block start where a device with a learned run time best starts. -#}
+{%- macro sp_offset(d, s) -%}
+{%- set x = sp_dev_j(d) | from_json -%}
+{%- set B = sp_block_s() | int -%}{%- set Q = B // 900 -%}
+{%- set m = sp_duration(d) | int -%}
+{%- if x.type == 'appliance' and m > 0 -%}
+{%- set n = [((m + 10) / 15) | round(0, 'ceil') | int, 1] | max -%}
+{%- if n < Q -%}
+{%- set p = (sp_quarters_j(s | int, sp_peak_kw(d)) | from_json) | selectattr(0,'lt',s | int + B) | list -%}
+{%- if p | count == Q -%}
+{%- set b = namespace(c=none, j=0) -%}
+{%- for j in range(0, Q - n + 1) -%}{%- set v = p[j:j + n] | map(attribute=3) | sum -%}{%- if b.c is none or v < b.c - 0.0001 -%}{%- set b.c = v -%}{%- set b.j = j -%}{%- endif -%}{%- endfor -%}
+{{- b.j * 900 -}}
+{%- else -%}0{%- endif -%}
+{%- else -%}0{%- endif -%}
+{%- else -%}0{%- endif -%}
+{%- endmacro -%}
+
+{#- Most likely reason why a device did not start, in the configured language. -#}
+{%- macro sp_diagnose(d) -%}
+{%- set k = sp_check_j(d) | from_json -%}
+{%- set s = sp_settings_j() | from_json -%}
+{%- if not s.enabled -%}{{ t('diag_disabled') }}
+{%- elif k.reason -%}{{ k.reason }}
+{%- else -%}{{ t('diag_none') }}{%- endif -%}
+{%- endmacro -%}

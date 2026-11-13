@@ -1,0 +1,97 @@
+{#- Slotplanner storage: applies changes to the planner state and keeps history and statistics.
+    Used by script.slotplanner_write only. -#}
+
+{#- Apply a list of operations to the state.
+    add      {d, s}                     new plan for device d in the block that starts at s
+    set      {id, f: {...}}             merge fields into a plan
+    step     {id, w, r, o}              add a step (r: ok, fail or info; o: cause)
+    meter    {id, kwh, net, eur, bes, w} add one minute of measurement (w = 0 only counts the run time)
+    del      {id, archive}              remove a plan, keep it in the history when archive is true
+    settings {f: {...}}                 merge settings (autoplan and replanned are merged per key)
+    sub_add  {sub: {...}}               add a message subscription
+    sub_del  {sid}                      remove a message subscription
+    list_set {key, person, on}          add or remove a person in nightly, overview, early or remind
+    touch    {add: [...], remove: [...]} entities the planner switched on
+    Returns {"state": {...}, "archive": [...]} -#}
+{%- macro sp_apply_j(cur, ops, nu) -%}
+{%- set ns = namespace(plans=cur.plans | default([]), settings=cur.settings | default({}), touched=cur.touched | default([]), arch=[]) -%}
+{%- for o in ops if o is mapping and o.op is defined -%}
+{%- if o.op == 'add' -%}
+{%- set pid = o.d ~ ':' ~ (o.s | int) -%}
+{%- set old = ns.plans | selectattr('id','eq',pid) | list -%}
+{%- if old and old[0].st in ['done','failed','stopped'] -%}
+{#- A finished plan in the same block: keep it in the history and make room for the new one. -#}
+{%- set ns.arch = ns.arch + [dict(old[0], id=pid ~ ':' ~ (nu | int))] -%}
+{%- set ns.plans = ns.plans | rejectattr('id','eq',pid) | list -%}
+{%- endif -%}
+{%- if ns.plans | selectattr('id','eq',pid) | list | count == 0 -%}
+{%- set ns.plans = ns.plans + [{'id': pid, 'd': o.d, 's': o.s | int, 'st': 'planned', 'rs': 0, 'e': 0, 'm': {}, 'f': {}, 'steps': [], 'made': nu | int}] -%}
+{%- endif -%}
+{%- elif o.op in ['set','step','meter'] -%}
+{%- set out = namespace(v=[]) -%}
+{%- for p in ns.plans -%}
+{%- if p.id == o.id -%}
+{%- if o.op == 'set' -%}{%- set p = dict(p, **o.f) -%}
+{%- elif o.op == 'step' -%}{%- set p = dict(p, steps=((p.steps | default([])) + [{'t': nu | int, 'w': o.w, 'r': o.r | default('info'), 'o': o.o | default('')}])[-15:]) -%}
+{%- else -%}
+{%- set m = p.m | default({}) -%}
+{%- set p = dict(p, m={'kwh': ((m.kwh | default(0)) + o.kwh) | round(5), 'net': ((m.net | default(0)) + o.net) | round(5), 'eur': ((m.eur | default(0)) + o.eur) | round(5), 'bes': ((m.bes | default(0)) + o.bes) | round(5), 'min': (m.min | default(0)) + (1 if o.w > 0 else 0), 'run': (m.run | default(0)) + 1, 'pk': [m.pk | default(0), o.w] | max}) -%}
+{%- endif -%}
+{%- endif -%}
+{%- set out.v = out.v + [p] -%}
+{%- endfor -%}
+{%- set ns.plans = out.v -%}
+{%- elif o.op == 'del' -%}
+{%- if o.archive | default(false) -%}{%- set ns.arch = ns.arch + (ns.plans | selectattr('id','eq',o.id) | list) -%}{%- endif -%}
+{%- set ns.plans = ns.plans | rejectattr('id','eq',o.id) | list -%}
+{%- elif o.op == 'settings' -%}
+{%- set fx = namespace(f=o.f) -%}
+{%- for k in ['autoplan','replanned'] if k in o.f and o.f[k] is mapping -%}{%- set fx.f = dict(fx.f, **{k: dict(ns.settings.get(k) or {}, **o.f[k])}) -%}{%- endfor -%}
+{%- set ns.settings = dict(ns.settings, **fx.f) -%}
+{%- elif o.op == 'sub_add' -%}
+{%- set ns.settings = dict(ns.settings, subs=(ns.settings.subs | default([])) + [dict(o.sub, sid=o.sub.sid | default('s' ~ (nu | int) ~ (range(100, 999) | random)))]) -%}
+{%- elif o.op == 'sub_del' -%}
+{%- set ns.settings = dict(ns.settings, subs=(ns.settings.subs | default([])) | rejectattr('sid','eq',o.sid) | list) -%}
+{%- elif o.op == 'list_set' and o.key in ['nightly','overview','early','remind'] -%}
+{%- set l = ns.settings.get(o.key) if ns.settings.get(o.key) is not none else (o.default | default([])) -%}
+{%- set l = ((l + [o.person]) | unique | list) if o.on else (l | reject('eq', o.person) | list) -%}
+{%- set ns.settings = dict(ns.settings, **{o.key: l}) -%}
+{%- elif o.op == 'touch' -%}
+{%- set ns.touched = ((ns.touched + (o.add | default([]))) | unique | list) | reject('in', o.remove | default([])) | list -%}
+{%- endif -%}
+{%- endfor -%}
+{{- {'state': {'plans': ns.plans | sort(attribute='s'), 'settings': ns.settings, 'touched': ns.touched, 'rev': (cur.rev | default(0) | int) + 1}, 'archive': ns.arch} | tojson -}}
+{%- endmacro -%}
+
+{#- Put finished plans in the history (newest first, at most keep) and update the statistics. -#}
+{%- macro sp_archive_j(arch, keep) -%}
+{%- set old = state_attr('sensor.slotplanner_history','runs') or [] -%}
+{%- set runs = ((arch | sort(attribute='s', reverse=true) | list) + old)[:keep | int(80)] -%}
+{%- set S = states.sensor.slotplanner_stats.attributes if states.sensor.slotplanner_stats is defined and states.sensor.slotplanner_stats else {} -%}
+{%- set ns = namespace(week=S.week | default({}), month=S.month | default({}), year=S.year | default({}), learn=S.learn | default({}), since=S.since | default(now().strftime('%Y-%m-%d'))) -%}
+{%- for r in arch if (r.m | default({})).kwh | default(0) > 0.01 -%}
+{%- set m = r.m -%}
+{%- set dt = as_local(as_datetime(r.s | int)) -%}
+{%- set keys = {'week': dt.strftime('%G-W%V'), 'month': dt.strftime('%Y-%m'), 'year': dt.strftime('%Y')} -%}
+{%- for per in ['week','month','year'] -%}
+{%- set tab = ns[per] -%}
+{%- set k = keys[per] -%}
+{%- set a = tab.get(k, {'kwh':0,'eur':0,'bes':0,'n':0,'dev':{}}) -%}
+{%- set dv = a.dev | default({}) -%}
+{%- set b = dv.get(r.d, {'kwh':0,'eur':0,'bes':0,'n':0}) -%}
+{%- set b = {'kwh': (b.kwh + m.kwh) | round(3), 'eur': (b.eur + m.eur) | round(3), 'bes': (b.bes + m.bes) | round(3), 'n': b.n + 1} -%}
+{%- set a = {'kwh': (a.kwh + m.kwh) | round(3), 'eur': (a.eur + m.eur) | round(3), 'bes': (a.bes + m.bes) | round(3), 'n': a.n + 1, 'dev': dict(dv, **{r.d: b})} -%}
+{%- set tab = dict(tab, **{k: a}) -%}
+{%- set lim = {'week': 12, 'month': 24, 'year': 10}[per] -%}
+{%- set kk = tab.keys() | list | sort -%}
+{%- set tab2 = namespace(d={}) -%}{%- for z in kk[-lim:] -%}{%- set tab2.d = dict(tab2.d, **{z: tab[z]}) -%}{%- endfor -%}
+{%- if per == 'week' -%}{%- set ns.week = tab2.d -%}{%- elif per == 'month' -%}{%- set ns.month = tab2.d -%}{%- else -%}{%- set ns.year = tab2.d -%}{%- endif -%}
+{%- endfor -%}
+{%- set L = ns.learn -%}
+{%- set L = dict(L, **{r.d ~ '_kwh': ((L.get(r.d ~ '_kwh') or []) + [m.kwh | round(3)])[-10:]}) -%}
+{%- if m.pk | default(0) > 0 and m.min | default(0) >= 10 -%}{%- set L = dict(L, **{r.d ~ '_pk': ((L.get(r.d ~ '_pk') or []) + [m.pk | round(0)])[-10:]}) -%}{%- endif -%}
+{%- if r.st == 'done' and (r.f | default({})).seen | default(0) and m.run | default(m.min | default(0)) >= 10 -%}{%- set L = dict(L, **{r.d ~ '_min': ((L.get(r.d ~ '_min') or []) + [m.run | default(m.min)])[-10:]}) -%}{%- endif -%}
+{%- set ns.learn = L -%}
+{%- endfor -%}
+{{- {'runs': runs, 'stats': {'week': ns.week, 'month': ns.month, 'year': ns.year, 'learn': ns.learn, 'since': ns.since}} | tojson -}}
+{%- endmacro -%}

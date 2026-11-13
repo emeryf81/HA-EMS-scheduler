@@ -26,6 +26,8 @@
   'step_resumed': 'Resumed after the pause.',
   'step_stopped': 'Switched off by hand during the block. It does not start again in this block.',
   'step_replanned': 'Planned again in the block of {0} after a failure.',
+  'step_off_failed': 'Could not switch off {0}. The planner tries again every minute.',
+  'step_disabled': 'Stopped: the Slotplanner was switched off.',
   'reason_auto': 'started by another automation',
   'reason_hand': 'started by hand or from the app',
   'reason_sun': ', {0} W solar at that moment',
@@ -116,6 +118,8 @@
   'step_resumed': 'Hervat na de pauze.',
   'step_stopped': 'Met de hand afgezet tijdens het blok. Het start in dit blok niet opnieuw.',
   'step_replanned': 'Na een mislukking opnieuw ingepland in het blok van {0}.',
+  'step_off_failed': 'Kon {0} niet uitzetten. De planner probeert het elke minuut opnieuw.',
+  'step_disabled': 'Gestopt: de Slotplanner werd uitgezet.',
   'reason_auto': 'gestart door een andere automatisering',
   'reason_hand': 'met de hand of via de app gestart',
   'reason_sun': ', {0} W zonnestroom op dat moment',
@@ -184,6 +188,6 @@
 } -%}
 {%- macro t(key, a='', b='', c='', d='') -%}
 {%- set lang = ((slotplanner_config() | from_json).general | default({})).language | default('en') -%}
-{%- set d = T.get(lang, T.en) -%}
-{{- (d.get(key) or T.en.get(key) or key) | replace('{0}', a | string) | replace('{1}', b | string) | replace('{2}', c | string) | replace('{3}', d | string) -}}
+{%- set texts = T.get(lang, T.en) -%}
+{{- (texts.get(key) or T.en.get(key) or key) | replace('{0}', a | string) | replace('{1}', b | string) | replace('{2}', c | string) | replace('{3}', d | string) -}}
 {%- endmacro -%}

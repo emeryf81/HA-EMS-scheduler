@@ -3,7 +3,7 @@
  * (sensor.slotplanner_config, _state, _slots, _prices, _history, _stats) and calls its scripts.
  * Add as resource: /local/slotplanner/slotplanner-card.js (JavaScript module), card: type: custom:slotplanner-card
  */
-const SP_VERSION = '1.0.0';
+const SP_VERSION = '1.0.1';
 
 const I18N = {
   en: {
@@ -35,11 +35,11 @@ const I18N = {
     earlyN: 'Device started earlier', earlyNSub: 'A phone message when a device starts before its block.',
     remindN: 'Not ready reminder', remindNSub: 'A phone message before the block when a device is not ready.',
     checkTitle: 'Setup check', checkOk: 'The configuration looks fine.', enabled: 'Slotplanner on',
-    enabledSub: 'Off: nothing starts, plans stay.', cfgFile: 'Change devices and sources in custom_templates/slotplanner_config.jinja, then run script Slotplanner: reload configuration.',
+    enabledSub: 'Off: nothing starts and running switches, climate and chargers stop. The plan stays.', cfgFile: 'Change devices and sources in custom_templates/slotplanner_config.jinja, then run script Slotplanner: reload configuration.',
     blockLen: 'Block length {0} h, {1} blocks per day.', prices: 'Prices: {0}', solar: 'Solar: {0}', reload: 'Reload configuration',
     learned: 'Learned', learnedSub: 'After two runs the planner uses the measured peak and run time.',
     wOff: 'not reachable', wDoor: 'door open', wRemote: 'remote start is off', wProg: 'no program set ({0})', wCable: 'car not connected',
-    error: 'Error: {0}', ready: 'ready', notReady: 'not ready: {0}', stParked: 'paused',
+    error: 'Error: {0}', noAnswer: 'No answer from Home Assistant. Check the plan or try again.', ready: 'ready', notReady: 'not ready: {0}', stParked: 'paused',
   },
   nl: {
     plan: 'Plannen', runs: 'Cycli', reports: 'Rapporten', setup: 'Instellen',
@@ -70,18 +70,16 @@ const I18N = {
     earlyN: 'Toestel vroeger gestart', earlyNSub: 'Een bericht als een toestel start voor zijn blok.',
     remindN: 'Herinnering niet klaar', remindNSub: 'Een bericht voor het blok als een toestel niet klaar staat.',
     checkTitle: 'Controle van de instellingen', checkOk: 'De configuratie ziet er goed uit.', enabled: 'Slotplanner aan',
-    enabledSub: 'Uit: er start niets, de planning blijft.', cfgFile: 'Toestellen en bronnen pas je aan in custom_templates/slotplanner_config.jinja. Draai daarna script Slotplanner: reload configuration.',
+    enabledSub: 'Uit: er start niets en lopende schakelaars, airco\'s en laadpalen stoppen. De planning blijft.', cfgFile: 'Toestellen en bronnen pas je aan in custom_templates/slotplanner_config.jinja. Draai daarna script Slotplanner: reload configuration.',
     blockLen: 'Blokken van {0} u, {1} per dag.', prices: 'Prijzen: {0}', solar: 'Zon: {0}', reload: 'Configuratie herladen',
     learned: 'Geleerd', learnedSub: 'Na twee keer gebruikt de planner het gemeten piekvermogen en de looptijd.',
     wOff: 'niet bereikbaar', wDoor: 'deur open', wRemote: 'starten op afstand staat uit', wProg: 'geen programma gekozen ({0})', wCable: 'auto niet aangesloten',
-    error: 'Fout: {0}', ready: 'staat klaar', notReady: 'niet klaar: {0}', stParked: 'gepauzeerd',
+    error: 'Fout: {0}', noAnswer: 'Geen antwoord van Home Assistant. Kijk de planning na of probeer opnieuw.', ready: 'staat klaar', notReady: 'niet klaar: {0}', stParked: 'gepauzeerd',
   },
 };
 
 const fmt = (s, ...a) => String(s).replace(/\{(\d)\}/g, (_, i) => (a[i] !== undefined ? a[i] : ''));
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const settingsKey = (value) => JSON.stringify(value, (_, v) =>
-  v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
 const dayKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 class SlotplannerCard extends HTMLElement {
@@ -100,10 +98,6 @@ class SlotplannerCard extends HTMLElement {
 
   set hass(h) {
     this._h = h;
-    const published = this._a('sensor.slotplanner_state', 'settings') || {};
-    for (const [key, value] of Object.entries(this._pendingSettings || {})) {
-      if (settingsKey(published[key]) === settingsKey(value)) delete this._pendingSettings[key];
-    }
     if (!this.shadowRoot) { this.attachShadow({ mode: 'open' }); this._timer = setInterval(() => { this._sig = ''; this._render(); }, 30000); }
     const ids = ['config', 'state', 'slots', 'prices', 'history', 'stats'].map((k) => `sensor.slotplanner_${k}`);
     const devs = (this._cfg().devices || []).flatMap((d) => [d.status, d.switch, d.power_sensor, d.soc, d.cable, d.door, d.remote].filter(Boolean));
@@ -122,7 +116,7 @@ class SlotplannerCard extends HTMLElement {
   _B() { return ((this._cfg().general || {}).block_hours || 3) * 3600; }
   _plans() { return this._a('sensor.slotplanner_state', 'plans') || []; }
   _settings() {
-    const s = { ...(this._a('sensor.slotplanner_state', 'settings') || {}), ...this._pendingSettings };
+    const s = this._a('sensor.slotplanner_state', 'settings') || {};
     const c = this._cfg(); const first = (c.people || []).slice(0, 1).map((p) => p.id);
     const ap = {}; (c.devices || []).forEach((d) => { ap[d.id] = s.autoplan && d.id in s.autoplan ? s.autoplan[d.id] : d.autoplan !== 'off'; });
     return { enabled: s.enabled !== false, autoplan: ap, subs: s.subs || [], nightly: s.nightly || first, overview: s.overview || first, early: s.early || first, remind: s.remind || (c.people || []).map((p) => p.id) };
@@ -135,7 +129,7 @@ class SlotplannerCard extends HTMLElement {
   _cur(v) { return `${(this._cfg().general || {}).currency || '€'} ${this._num(v, 2)}`; }
   _hm(ts) { return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }); }
   _dhm(ts) { const d = new Date(ts * 1000); return `${d.toLocaleDateString([], { weekday: 'short' })} ${this._hm(ts)}`; }
-  _win(p) { const s = p.rs > 0 && p.rs < p.s ? p.rs : p.s; return [s, s + this._B()]; }
+  _win(p) { const s = p.rs > 0 && p.rs < p.s ? p.rs : p.s; let e = s + this._B(); const n = Date.now() / 1000; if (p.st === 'active' && e <= n && this._plans().some((x) => x.id === p.id)) e = n + 900; return [s, e]; }
   _check(d) {
     const x = this._dev(d); const st = (e) => this._st(e); const why = []; let run = false;
     if (x.type === 'appliance') {
@@ -169,28 +163,20 @@ class SlotplannerCard extends HTMLElement {
   async _planReq(d, s) {
     const req = `r${Date.now()}${Math.floor(Math.random() * 1000)}`;
     this._msg = '…'; this._sig = ''; this._render();
-    try { await this._h.callService('script', 'slotplanner_plan', { device: d, start: s, req }); } catch (e) { /* the result below tells what happened */ }
+    let err = '';
+    try { await this._h.callService('script', 'slotplanner_plan', { device: d, start: s, req }); } catch (e) { err = (e && (e.message || e.error)) || String(e); }
+    let got = false;
     for (let i = 0; i < 40; i++) {
       const last = (this._a('sensor.slotplanner_state', 'settings') || {}).last;
-      if (last && String(last.req) === req) { this._msg = last.ok ? this._t('planOk', this._dev(d).name, this._dhm(s)) : last.msg; if (last.ok) this._sel = ''; break; }
+      if (last && String(last.req) === req) { got = true; this._msg = last.ok ? this._t('planOk', this._dev(d).name, this._dhm(s)) : last.msg; if (last.ok) this._sel = ''; break; }
       await new Promise((r) => setTimeout(r, 250));
     }
+    if (!got) this._msg = err ? this._t('error', err) : this._t('noAnswer');
     this._sig = ''; this._render();
   }
-  async _saveSettings(f) {
-    this._pendingSettings = { ...this._pendingSettings, ...f };
-    this._sig = ''; this._render();
-    try {
-      await this._h.callService('script', 'slotplanner_settings', { settings: f });
-      this._msg = '';
-    } catch (e) {
-      for (const [key, value] of Object.entries(f)) {
-        if (this._pendingSettings[key] === value) delete this._pendingSettings[key];
-      }
-      this._msg = this._t('error', e.message || e);
-    }
-    this._sig = ''; this._render();
-  }
+  _saveSettings(f) { return this._call('slotplanner_settings', { settings: f }); }
+  // Small changes go to the writer as operations, so two quick clicks never overwrite each other.
+  _ops(ops) { return this._call('slotplanner_write', { ops }); }
 
   // ---------------------------------------------------------------- render
   _render() {
@@ -217,7 +203,8 @@ class SlotplannerCard extends HTMLElement {
     const pr = this._prices(); const slots = this._slots(); const plans = this._plans();
     const cur = pr.find((x) => x[0] <= now && now < x[0] + 900);
     const d0 = new Date(); d0.setHours(0, 0, 0, 0); const t0 = d0.getTime() / 1000;
-    const today = pr.filter((x) => x[0] >= t0 && x[0] < t0 + 86400).map((x) => x[1]);
+    const d1 = new Date(d0); d1.setDate(d1.getDate() + 1); const t1 = d1.getTime() / 1000;
+    const today = pr.filter((x) => x[0] >= t0 && x[0] < t1).map((x) => x[1]);
     const avg = today.length ? today.reduce((a, b) => a + b, 0) / today.length : 0;
     const busyStarts = plans.filter((p) => ['planned', 'active'].includes(p.st)).map((p) => this._win(p)[0]);
     const freeSlots = slots.filter((s) => s.e > now && !plans.some((p) => ['planned', 'active'].includes(p.st) && p.s === s.s));
@@ -281,22 +268,24 @@ class SlotplannerCard extends HTMLElement {
 
   _chart(pr, slots, plans) {
     const now = Date.now() / 1000; const d0 = new Date(); d0.setHours(0, 0, 0, 0); const t0 = d0.getTime() / 1000;
-    const days = this._chartDay || 0; const a = t0 + days * 86400; const b = a + 86400;
+    const days = this._chartDay || 0;
+    const da = new Date(d0); da.setDate(da.getDate() + days); const db = new Date(da); db.setDate(db.getDate() + 1);
+    const a = da.getTime() / 1000; const b = db.getTime() / 1000; const NQ = Math.round((b - a) / 900);
     const q = pr.filter((x) => x[0] >= a && x[0] < b); if (!q.length) return '';
     const vals = q.map((x) => x[1]); const mn = Math.min(...vals); const mx = Math.max(...vals); const sp = Math.max(mx - mn, 0.001);
-    const W = 960; const H = 200; const bw = W / 96; const y = (v) => H - 14 - ((v - mn) / sp) * (H - 50);
+    const W = 960; const H = 200; const bw = W / NQ; const y = (v) => H - 14 - ((v - mn) / sp) * (H - 50);
     const col = (v) => { const r = (v - mn) / sp; return r < 0.33 ? '#84cc16' : r < 0.66 ? '#eab308' : r < 0.85 ? '#f97316' : '#ef4444'; };
     let svg = `<svg viewBox="0 0 ${W} ${H + 18}" class="ch" preserveAspectRatio="none">`;
     q.forEach((x) => { const i = Math.round((x[0] - a) / 900); svg += `<rect x="${i * bw + 0.5}" y="${y(x[1])}" width="${bw - 1}" height="${H - 14 - y(x[1]) + 1}" fill="${col(x[1])}" opacity="${x[0] + 900 < now ? 0.35 : 0.9}"/>`; });
     for (const s of slots.filter((s) => s.e > a && s.s < b)) {
-      const i0 = Math.max(0, (s.s - a) / 900); const i1 = Math.min(96, (s.e - a) / 900);
+      const i0 = Math.max(0, (s.s - a) / 900); const i1 = Math.min(NQ, (s.e - a) / 900);
       const full = plans.some((p) => ['planned', 'active'].includes(p.st) && p.s === s.s);
       svg += `<rect class="slot" data-slot="${s.s}" x="${i0 * bw}" y="4" width="${(i1 - i0) * bw}" height="${H - 18}" fill="${full ? 'rgba(99,102,241,.18)' : 'rgba(255,255,255,.04)'}" stroke="#eab308" stroke-dasharray="5 4" rx="6"/>`;
       if (s.sc >= 0) svg += `<text x="${((i0 + i1) / 2) * bw}" y="20" text-anchor="middle" class="tsc ${s.sc >= 70 ? 'g' : s.sc >= 40 ? 'm' : 'b'}">${s.sc}</text>`;
     }
     for (const p of plans.filter((p) => ['planned', 'active'].includes(p.st) && !slots.some((s) => s.s === p.s))) {
       const [ps, pe] = this._win(p); if (pe <= a || ps >= b) continue;
-      const i0 = Math.max(0, (ps - a) / 900); const i1 = Math.min(96, (pe - a) / 900);
+      const i0 = Math.max(0, (ps - a) / 900); const i1 = Math.min(NQ, (pe - a) / 900);
       svg += `<rect x="${i0 * bw}" y="4" width="${(i1 - i0) * bw}" height="${H - 18}" fill="rgba(99,102,241,.18)" stroke="#818cf8" stroke-dasharray="2 3" rx="6"/>`;
     }
     const sun = (this._a('sensor.slotplanner_slots', 'solar') || []).filter((x) => x[0] >= a && x[0] < b);
@@ -305,9 +294,9 @@ class SlotplannerCard extends HTMLElement {
       svg += `<polyline fill="none" stroke="#facc15" stroke-width="2.5" opacity=".9" points="${sun.map((x) => `${((x[0] - a) / 900 + 0.5) * bw},${H - 14 - (x[1] / zmax) * (H - 60)}`).join(' ')}"/>`;
     }
     if (now >= a && now < b) { const i = (now - a) / 900; svg += `<line x1="${i * bw}" x2="${i * bw}" y1="0" y2="${H - 14}" stroke="#fff" stroke-width="2"/>`; }
-    for (let hr = 0; hr < 24; hr += 4) svg += `<text x="${hr * 4 * bw + 2}" y="${H + 12}" class="tx">${String(hr).padStart(2, '0')}h</text>`;
+    for (let i = 0; i < NQ; i++) { const dt = new Date((a + i * 900) * 1000); if (dt.getMinutes() === 0 && dt.getHours() % 4 === 0) svg += `<text x="${i * bw + 2}" y="${H + 12}" class="tx">${String(dt.getHours()).padStart(2, '0')}h</text>`; }
     svg += '</svg>';
-    const hasTomorrow = pr.some((x) => x[0] >= t0 + 86400);
+    const tm = new Date(d0); tm.setDate(tm.getDate() + 1); const hasTomorrow = pr.some((x) => x[0] >= tm.getTime() / 1000);
     return `<div class="chh"><b>${new Date(a * 1000).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'numeric' })}</b>
       <span>${this._t('lowest', this._num(mn * 100, 1))} · ${this._t('highest', this._num(mx * 100, 1))}</span>
       ${hasTomorrow ? `<button class="mini" data-cday="${days ? 0 : 1}">${days ? '◀' : '▶'}</button>` : ''}</div><div class="chw">${svg}</div>`;
@@ -359,7 +348,7 @@ class SlotplannerCard extends HTMLElement {
     const S = this._sub;
     const lvl = { all: 'howAll', important: 'howImp', fail: 'howFail' };
     h += `<div class="box"><div class="bt">${this._t('msgTitle')}</div><div class="bs">${this._t('msgSub')}</div>
-      <div class="subs">${set.subs.length ? set.subs.map((a, i) => `<div class="subi"><b>${esc((people.find((p) => p.id === a.person) || { name: a.person }).name)}</b><span>${this._t(lvl[a.level] || 'howAll')} · ${a.devices && a.devices.length ? a.devices.map((d) => esc(this._dev(d).name)).join(', ') : this._t('allDevices')} · ${a.until || '∞'}</span><button class="x" data-subdel="${i}">✕</button></div>`).join('') : `<div class="empty sm">${this._t('none')}</div>`}</div>
+      <div class="subs">${set.subs.length ? set.subs.map((a) => `<div class="subi"><b>${esc((people.find((p) => p.id === a.person) || { name: a.person }).name)}</b><span>${this._t(lvl[a.level] || 'howAll')} · ${a.devices && a.devices.length ? a.devices.map((d) => esc(this._dev(d).name)).join(', ') : this._t('allDevices')} · ${a.until || '∞'}</span><button class="x" data-subdel="${esc(a.sid || '')}" aria-label="remove">✕</button></div>`).join('') : `<div class="empty sm">${this._t('none')}</div>`}</div>
       <div class="lab">${this._t('person')}</div><div class="chips">${people.map((p) => `<button class="chip ${S.person === p.id ? 'on' : ''}" data-sp="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>
       <div class="lab">${this._t('how')}</div><div class="chips">${Object.entries(lvl).map(([k, l]) => `<button class="chip ${S.level === k ? 'on' : ''}" data-sl="${k}">${this._t(l)}</button>`).join('')}</div>
       <div class="lab">${this._t('howLong')}</div><div class="chips">${[['today', 'today'], ['week', 'week'], ['always', 'always']].map(([k, l]) => `<button class="chip ${S.until === k ? 'on' : ''}" data-su="${k}">${this._t(l)}</button>`).join('')}</div>
@@ -391,13 +380,10 @@ class SlotplannerCard extends HTMLElement {
   // ---------------------------------------------------------------- events
   _bind() {
     const r = this.shadowRoot; const q = (s) => r.querySelectorAll(s);
-    q('[data-dev],[data-open]').forEach((b) => (b.onkeydown = (ev) => {
-      if (ev.target !== b || !['Enter', ' '].includes(ev.key)) return;
-      ev.preventDefault(); b.click();
-    }));
     q('[data-tab]').forEach((b) => (b.onclick = () => { this._tab = b.dataset.tab; this._msg = ''; this._sig = ''; this._render(); }));
     q('[data-dev]').forEach((b) => (b.onclick = (ev) => { if (ev.target.closest('[data-stop],[data-del]')) return; this._sel = this._sel === b.dataset.dev ? '' : b.dataset.dev; this._msg = ''; this._sig = ''; this._render(); }));
-    q('[data-ap]').forEach((i) => (i.onchange = () => { const ap = {}; ap[i.dataset.ap] = i.checked; this._saveSettings({ autoplan: Object.assign({}, this._settings().autoplan, ap) }); }));
+    q('[data-ap]').forEach((i) => (i.onchange = () => { const ap = {}; ap[i.dataset.ap] = i.checked; this._saveSettings({ autoplan: ap }); }));
+    q('[role="button"][tabindex="0"]').forEach((el) => (el.onkeydown = (ev) => { if ((ev.key === 'Enter' || ev.key === ' ') && ev.target === el) { ev.preventDefault(); el.click(); } }));
     q('[data-del]').forEach((b) => (b.onclick = (ev) => { ev.stopPropagation(); this._call('slotplanner_unplan', { plan_id: b.dataset.del }, this._t('removeOk')); }));
     q('[data-slot]').forEach((b) => (b.onclick = () => {
       if (!this._sel) { this._msg = this._t('step1'); this._sig = ''; this._render(); return; }
@@ -415,8 +401,7 @@ class SlotplannerCard extends HTMLElement {
       if (a === 'preview') { this._preview = !this._preview; if (this._preview) this._loadPreview(); this._sig = ''; this._render(); }
       if (a === 'subadd') {
         const S = this._sub; const d = new Date(); const until = S.until === 'always' ? '' : S.until === 'week' ? dayKey(new Date(Date.now() + 6 * 86400000)) : dayKey(d);
-        const subs = this._settings().subs.concat([{ person: S.person, devices: S.devices, level: S.level, until }]);
-        this._saveSettings({ subs });
+        this._ops([{ op: 'sub_add', sub: { person: S.person, devices: S.devices, level: S.level, until } }]);
       }
     }));
     q('[data-mk]').forEach((b) => (b.onclick = () => { this._mail.kind = b.dataset.mk; this._previewHtml = ''; if (this._preview) this._loadPreview(); this._sig = ''; this._render(); }));
@@ -429,8 +414,8 @@ class SlotplannerCard extends HTMLElement {
     q('[data-sl]').forEach((b) => (b.onclick = () => { this._sub.level = b.dataset.sl; this._sig = ''; this._render(); }));
     q('[data-su]').forEach((b) => (b.onclick = () => { this._sub.until = b.dataset.su; this._sig = ''; this._render(); }));
     q('[data-sdev]').forEach((b) => (b.onclick = () => { this._sub.devices = toggle(this._sub.devices, b.dataset.sdev); this._sig = ''; this._render(); }));
-    q('[data-subdel]').forEach((b) => (b.onclick = () => { const subs = this._settings().subs.slice(); subs.splice(Number(b.dataset.subdel), 1); this._saveSettings({ subs }); }));
-    q('[data-fx]').forEach((i) => (i.onchange = () => { const k = i.dataset.fx; const f = {}; f[k] = toggle(this._settings()[k], i.dataset.p); this._saveSettings(f); }));
+    q('[data-subdel]').forEach((b) => (b.onclick = () => this._ops([{ op: 'sub_del', sid: b.dataset.subdel }])));
+    q('[data-fx]').forEach((i) => (i.onchange = () => this._ops([{ op: 'list_set', key: i.dataset.fx, person: i.dataset.p, on: i.checked, default: this._settings()[i.dataset.fx] }])));
     q('[data-en]').forEach((i) => (i.onchange = () => this._saveSettings({ enabled: i.checked })));
     q('[data-open]').forEach((b) => (b.onclick = () => { const id = b.dataset.open; this._open[id] = !this._open[id]; this._sig = ''; this._render(); }));
     q('[data-fd]').forEach((s) => (s.onchange = () => { this._filter.d = s.value; this._sig = ''; this._render(); }));
@@ -438,13 +423,13 @@ class SlotplannerCard extends HTMLElement {
   }
 
   async _loadPreview() {
-    const M = this._mail;
+    const M = this._mail; const token = (this._pvTok = (this._pvTok || 0) + 1);
     const tpl = `{% from 'slotplanner_report.jinja' import sp_report %}{{ sp_report(${JSON.stringify(M.kind)}, ${JSON.stringify(M.day || dayKey(new Date(Date.now() - 86400000)))}, ${Number(M.days) || 7}, ${JSON.stringify(M.devices)}, '') }}`;
     try {
       let unsub = null; let done = false;
-      unsub = await this._h.connection.subscribeMessage((msg) => { this._previewHtml = msg.result; this._sig = ''; this._render(); done = true; if (unsub) unsub(); }, { type: 'render_template', template: tpl });
+      unsub = await this._h.connection.subscribeMessage((msg) => { done = true; if (unsub) unsub(); if (token !== this._pvTok) return; this._previewHtml = msg.result; this._sig = ''; this._render(); }, { type: 'render_template', template: tpl });
       if (done && unsub) unsub();
-    } catch (e) { this._previewHtml = `<p>${esc(e.message || e)}</p>`; this._sig = ''; this._render(); }
+    } catch (e) { if (token !== this._pvTok) return; this._previewHtml = `<p>${esc(e.message || e)}</p>`; this._sig = ''; this._render(); }
   }
 }
 
@@ -473,6 +458,7 @@ h2{margin:4px 0 2px;font-size:24px}
 .n{display:inline-flex;width:22px;height:22px;border-radius:50%;background:#d4ab4e;color:#111;align-items:center;justify-content:center;font-size:12px}
 .devs{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px}
 .dev{border:1px solid var(--ln);border-radius:14px;padding:10px;cursor:pointer}
+.dev:focus-visible,.rh:focus-visible,.blk:focus-visible,.chip:focus-visible,.btn:focus-visible,.tab:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 .dev.sel{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}.dev.act{border-color:rgba(34,211,238,.6)}
 .dt{display:flex;gap:10px;align-items:flex-start}.dt b{display:block}.dt small{display:block;color:var(--mut);font-size:12px}.dt small.warn{color:var(--warn)}.dt small.ok{color:var(--good)}
 .ap{display:flex;align-items:center;gap:6px;font-size:13px;margin-top:8px;border-top:1px solid var(--ln);padding-top:6px}

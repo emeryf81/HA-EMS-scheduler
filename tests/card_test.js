@@ -11,7 +11,7 @@ const api = async (p, body) => {
 };
 (async () => {
   const b = await chromium.launch();
-  const errs = [];
+  const errs = []; const fails = [];
   for (const [w, tag] of [[430, 'm'], [1100, 'd']]) {
     const c = await b.newContext({ viewport: { width: w, height: 900 }, deviceScaleFactor: 1, timezoneId: 'Europe/Brussels' });
     const p = await c.newPage();
@@ -40,10 +40,13 @@ const api = async (p, body) => {
       await p.evaluate(() => { e._tab = 'plan'; e._sig = ''; e._render(); });
       const r = await p.evaluate(async () => {
         const R = e.shadowRoot; const out = {};
+        // Keyboard: Enter on a device selects it.
+        const dv = R.querySelector('[data-dev="pool_pump"]'); dv.focus(); dv.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await new Promise((r) => setTimeout(r, 100)); out.keyboard = e._sel === 'pool_pump'; e._sel = ''; e._sig = ''; e._render();
         R.querySelector('[data-dev="car"]').click(); await new Promise((r) => setTimeout(r, 100));
         out.hint = (R.querySelector('.hint') || {}).textContent;
         const free = [...R.querySelectorAll('.blk')].filter((b) => !b.classList.contains('full')).pop();
-        if (!free) return { skipped: 'no free block' };
+        if (!free) return { error: 'no free block to plan in: clear the plan of the test house first' };
         free.click(); await new Promise((r) => setTimeout(r, 9000));
         out.msg = (R.querySelector('.msg') || {}).textContent;
         out.carPlans = (e._h.states['sensor.slotplanner_state'].attributes.plans || []).filter((x) => x.d === 'car').map((x) => x.s);
@@ -56,18 +59,32 @@ const api = async (p, body) => {
         e._tab = 'reports'; e._sig = ''; e._render();
         e.shadowRoot.querySelector('[data-sl="all"]').click(); e.shadowRoot.querySelector('[data-act="subadd"]').click(); await new Promise((r) => setTimeout(r, 2500));
         out.subs = e._h.states['sensor.slotplanner_state'].attributes.settings.subs;
+        out.subCount = (out.subs || []).length;
         e.shadowRoot.querySelector('[data-act="preview"]').click(); await new Promise((r) => setTimeout(r, 2500));
         out.preview = (e._previewHtml || '').length; out.previewStart = (e._previewHtml || '').slice(0, 120);
         return out;
       });
       console.log('interactions', JSON.stringify(r));
+      const check = (ok, what) => { if (!ok) fails.push(what); };
+      check(!r.error, r.error || '');
+      check(r.keyboard === true, 'Enter on a device does not select it');
+      check(/Car/.test(r.hint || ''), 'no hint after choosing a device');
+      check(r.msg && r.msg !== '…' && /planned|gepland/i.test(r.msg), 'planning a free block did not report success: ' + r.msg);
+      check(Array.isArray(r.carPlans) && Array.isArray(r.afterDel) && r.afterDel.length === r.carPlans.length - 1, 'removing the plan did not work');
+      check(r.conflict && r.conflict !== '…' && !/planned at|gepland om/i.test(r.conflict), 'a full block was accepted: ' + r.conflict);
+      check(r.subCount >= 1 && (r.subs || []).every((x) => x.sid), 'subscription not stored with an id');
+      check((r.preview || 0) > 1000 && /<html/.test(r.previewStart || ''), 'report preview is empty');
       await p.waitForTimeout(300);
       await p.screenshot({ path: path.join(out, 'card_reports_preview_d.png'), fullPage: true });
     }
     const ov = await p.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
     console.log(tag, 'overflow', ov);
+    if (ov[0] > ov[1]) fails.push(`${tag}: horizontal scroll (${ov[0]} > ${ov[1]})`);
     await c.close();
   }
   console.log('errors', errs);
+  if (errs.length) fails.push('browser errors: ' + errs.join(' | '));
   await b.close();
+  if (fails.length) { console.error('FAILED:\n- ' + fails.join('\n- ')); process.exit(1); }
+  console.log('PASSED');
 })().catch((e) => { console.error(e); process.exit(1); });
